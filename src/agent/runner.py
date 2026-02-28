@@ -55,8 +55,11 @@ async def run_agent(request: AssistantRequest) -> AssistantResponse:
     # ─── Passo 1: Montar o contexto inicial ────────────────────────
     context_start = time.perf_counter()
 
+    # Se tem perfil, usa os dados. Se não, indica que não tem.
+    profile_json = request.profile.model_dump_json() if request.profile else "Não disponível"
+
     context = PLANNER_PROMPT.format(
-        profile=request.profile.model_dump_json(),
+        profile=profile_json,
         has_transactions=bool(request.transactions),
         query=request.query,
     )
@@ -68,7 +71,8 @@ async def run_agent(request: AssistantRequest) -> AssistantResponse:
         )
         context += f"\n\nDados de transações (JSON):\n{txn_data}"
 
-    context += f"\n\nPerfil do cliente (JSON):\n{request.profile.model_dump_json()}"
+    if request.profile:
+        context += f"\n\nPerfil do cliente (JSON):\n{profile_json}"
 
     context_duration = (time.perf_counter() - context_start) * 1000
 

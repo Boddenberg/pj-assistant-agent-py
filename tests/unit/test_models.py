@@ -60,6 +60,33 @@ class TestTransaction:
         assert t.description == ""
 
 
+class TestAssistantRequest:
+    """Testes do modelo AssistantRequest (entrada do agente)."""
+
+    def test_full_request(self, sample_request):
+        """Request completa (com profile e transactions) deve funcionar."""
+        assert sample_request.customer_id == "cust-001"
+        assert sample_request.profile is not None
+        assert len(sample_request.transactions) == 5
+
+    def test_minimal_request(self):
+        """
+        Request mínima (somente query) deve funcionar.
+
+        Cenário: o front-end envia apenas a pergunta, sem contexto de perfil.
+        O agente deve aceitar e usar defaults seguros:
+          - customer_id = "anonymous"
+          - profile = None
+          - transactions = lista vazia
+        """
+        r = AssistantRequest(query="Quais as taxas do Itaú?")
+
+        assert r.query == "Quais as taxas do Itaú?"
+        assert r.customer_id == "anonymous"
+        assert r.profile is None
+        assert r.transactions == []
+
+
 class TestAssistantResponse:
     """Testes do modelo AssistantResponse (saída do agente)."""
 

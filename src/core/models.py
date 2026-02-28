@@ -91,27 +91,29 @@ class AgentStep(BaseModel):
 
 class AssistantRequest(BaseModel):
     """
-    Payload que o BFA (Go) envia para o agente.
+    Payload de entrada do agente.
 
-    O BFA já fez as chamadas paralelas para Profile API e Transactions API.
-    Aqui o agente recebe tudo pronto e foca em analisar + recomendar.
+    Aceita dois formatos:
 
-    Exemplo de uso:
-      POST /v1/assistant
-      {
-        "customer_id": "cust-001",
-        "profile": { ... },
-        "transactions": [ ... ],
-        "query": "Qual minha situação financeira?"
-      }
+      Mínimo (só query):
+        { "query": "Como abrir uma conta PJ?" }
+
+      Completo (BFA envia tudo):
+        {
+          "customer_id": "cust-001",
+          "profile": { ... },
+          "transactions": [ ... ],
+          "query": "Qual minha situação financeira?"
+        }
+
+    Quando customer_id/profile não são enviados, o agente responde
+    com base apenas na query + knowledge base (sem dados do cliente).
     """
-    customer_id: str                                    # ID do cliente
-    profile: CustomerProfile                            # Perfil completo
-    transactions: list[Transaction] = Field(            # Lista de transações
+    query: str                                          # Pergunta do cliente (obrigatório)
+    customer_id: str = "anonymous"                       # ID do cliente (opcional)
+    profile: CustomerProfile | None = None               # Perfil (opcional)
+    transactions: list[Transaction] = Field(             # Transações (opcional)
         default_factory=list,
-    )
-    query: str = Field(                                 # Pergunta do cliente
-        default="Gere um resumo financeiro e recomendações personalizadas.",
     )
 
 

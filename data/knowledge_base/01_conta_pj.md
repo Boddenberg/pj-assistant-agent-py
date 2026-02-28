@@ -6,7 +6,7 @@ A conta PJ é uma conta bancária digital voltada para empresas e empreendedores
 
 ## Tipos de Conta
 
-O banco oferece os seguintes tipos de conta PJ:
+O banco oferece o seguinte tipo de conta PJ:
 
 - **Conta Corrente (checking)**: conta padrão para movimentações diárias do negócio.
 - **Conta Poupança (savings)**: conta para reservas e aplicações da empresa.

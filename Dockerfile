@@ -6,54 +6,65 @@
 # Run:     docker run -p 8000:8000 --env-file .env pj-assistant-agent
 #
 # Otimizações:
-#   - python:3.11-slim → imagem menor (~150MB vs ~1GB)
-#   - Non-root user    → segurança (princípio do menor privilégio)
-#   - Cache de deps    → pyproject.toml copiado antes do código
-#   - HEALTHCHECK      → Railway/Docker detecta quando app está pronta
+#   - Multi-stage build     → imagem final sem compiladores (~60% menor)
+#   - PyTorch CPU-only      → sem CUDA (economiza ~4-5GB)
+#   - --no-cache-dir        → sem cache pip na imagem
+#   - Non-root user         → segurança
+#   - .dockerignore         → evita copiar .venv, .git, __pycache__
 # =============================================================================
 
-FROM python:3.11-slim
+# ─── Stage 1: Builder (compila dependências nativas) ───────────────
+FROM python:3.11-slim AS builder
 
-# Variáveis de build
-ARG APP_USER=appuser
-ARG APP_DIR=/app
-
-# Instala dependências de sistema necessárias para compilar pacotes nativos
-# (chromadb e sentence-transformers precisam de gcc/g++)
+# Dependências de compilação (gcc/g++ para chromadb, sentence-transformers)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Cria usuário não-root (segurança)
+WORKDIR /build
+
+# Instalar PyTorch CPU-ONLY primeiro (sem CUDA = ~200MB vs ~5GB)
+RUN pip install --no-cache-dir \
+    torch --index-url https://download.pytorch.org/whl/cpu
+
+# Copiar pyproject.toml e instalar dependências (cache de layer)
+COPY pyproject.toml .
+RUN pip install --no-cache-dir .
+
+# ─── Stage 2: Runtime (imagem final enxuta) ────────────────────────
+FROM python:3.11-slim
+
+ARG APP_USER=appuser
+ARG APP_DIR=/app
+
+# Apenas runtime deps (sem gcc/g++)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Criar usuário não-root
 RUN useradd --create-home --shell /bin/bash $APP_USER
 
 WORKDIR $APP_DIR
 
-# 1. Copia apenas pyproject.toml primeiro (cache de dependências)
-#    Docker cacheia essa layer — só rebuilda se pyproject.toml mudar.
-COPY pyproject.toml .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir .
+# Copiar site-packages instalados no builder (sem recompilar)
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
 
-# 2. Copia o restante do projeto (código, data, script de startup)
+# Copiar código do projeto
 COPY . .
 
-# Garante que start.sh seja executável
-RUN chmod +x start.sh
+# Permissões
+RUN chmod +x start.sh && \
+    mkdir -p data/chroma && \
+    chown -R $APP_USER:$APP_USER $APP_DIR
 
-# Cria diretório de dados com permissão para o usuário da app
-RUN mkdir -p data/chroma && chown -R $APP_USER:$APP_USER $APP_DIR
-
-# Troca para usuário não-root
 USER $APP_USER
 
-# Porta padrão (Railway injeta $PORT em runtime — o start.sh usa $PORT)
 EXPOSE 8000
 
-# Healthcheck: Railway e Docker verificam este endpoint para saber se o serviço está up
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:${PORT:-8000}/healthz')" || exit 1
 
-# Comando de startup: ingere RAG + sobe uvicorn (ver start.sh)
 CMD ["bash", "start.sh"]

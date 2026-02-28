@@ -1,0 +1,55 @@
+# =============================================================================
+# .dockerignore — Arquivos ignorados no build Docker
+# =============================================================================
+# Reduz o contexto enviado ao Docker daemon → build mais rápido.
+# Equivalente ao .gitignore mas para o builder Docker.
+# =============================================================================
+
+# Ambiente virtual Python
+.venv/
+venv/
+env/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Vector store local (regenerado no startup via start.sh)
+data/chroma/
+
+# Testes e cobertura
+tests/
+htmlcov/
+.coverage
+coverage.xml
+.pytest_cache/
+
+# Ferramentas de desenvolvimento
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (nunca incluir na imagem)
+.env
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Docs (não necessários na imagem)
+README.md
+

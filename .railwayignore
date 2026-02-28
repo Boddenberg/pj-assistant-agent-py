@@ -1,0 +1,51 @@
+# =============================================================================
+# .railwayignore — Arquivos ignorados no deploy do Railway
+# =============================================================================
+# Funciona igual ao .dockerignore: evita enviar arquivos desnecessários
+# para o builder do Railway, acelerando o upload e o build.
+# =============================================================================
+
+# Ambiente virtual Python
+.venv/
+venv/
+env/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Dados locais (Railway tem filesystem efêmero — regenerado no startup)
+data/chroma/
+
+# Testes e cobertura (não necessários em produção)
+tests/
+htmlcov/
+.coverage
+coverage.xml
+.pytest_cache/
+
+# Ferramentas de desenvolvimento
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (nunca subir)
+.env
+
+# Git
+.git/
+.gitignore
+

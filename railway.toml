@@ -1,0 +1,29 @@
+# =============================================================================
+# Railway — Configuração de Deploy
+# =============================================================================
+#
+# Documentação: https://docs.railway.app/reference/config-as-code
+#
+# O Railway detecta o Dockerfile automaticamente e usa este arquivo
+# para configurar o build e o runtime do serviço.
+# =============================================================================
+
+[build]
+# Usa o Dockerfile do projeto para construir a imagem
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Comando de startup: ingere a base RAG e depois sobe o servidor
+# O $PORT é injetado automaticamente pelo Railway
+startCommand = "bash start.sh"
+
+# Healthcheck — Railway verifica se o serviço está saudável
+# O endpoint /healthz retorna 200 quando a app está pronta
+healthcheckPath = "/healthz"
+healthcheckTimeout = 120
+
+# Reinicia automaticamente em caso de falha
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+

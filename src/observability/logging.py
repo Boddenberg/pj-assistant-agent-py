@@ -8,11 +8,19 @@ Por que structlog e não logging padrão?
     e todos os logs daquela request têm o contexto
   - Performance: cache de loggers, processadores otimizados
 
-Exemplo de saída:
-  {"event": "request_completed", "customer_id": "cust-001", "tokens": 450,
-   "cost_usd": 0.001, "duration_s": 2.3, "level": "info", "timestamp": "2026-..."}
+Exemplo de saída (dev — pretty):
+  {
+    "event": "request_completed",
+    "customer_id": "cust-001",
+    "tokens": 450,
+    "cost_usd": 0.001,
+    "duration_s": 2.3,
+    "level": "info",
+    "timestamp": "2026-..."
+  }
 
 Em produção:
+  - JSON compacto (uma linha por log) para ferramentas de log
   - Integrar com Datadog APM ou CloudWatch Logs
   - Adicionar correlation_id do BFA para tracing end-to-end
   - Configurar alerts em logs de error
@@ -30,14 +38,18 @@ def setup_logging() -> None:
     Deve ser chamado UMA VEZ no startup (lifespan do FastAPI).
     Após isso, qualquer módulo pode usar get_logger() para logar.
 
-    Processadores (executados em ordem):
-      1. merge_contextvars → adiciona variáveis de contexto (request_id, etc.)
-      2. add_log_level    → adiciona campo "level"
-      3. TimeStamper      → adiciona campo "timestamp" em ISO 8601
-      4. StackInfoRenderer → adiciona stack trace se houver
-      5. format_exc_info  → formata exceções
-      6. JSONRenderer     → serializa tudo como JSON
+    Modo de renderização:
+      - LOG_LEVEL=DEBUG → JSON pretty-printed (indentado, colorido no console)
+      - LOG_LEVEL=INFO+ em produção → JSON compacto (uma linha, machine-readable)
+
+    Dica: Para forçar pretty em dev, defina LOG_LEVEL=DEBUG no .env
     """
+    import logging
+
+    # Em dev (DEBUG/INFO local): JSON indentado e legível
+    # Em prod: JSON compacto (uma linha) para ELK/Datadog/CloudWatch
+    is_dev = settings.log_level.upper() == "DEBUG"
+
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,     # Contexto da request
@@ -45,15 +57,18 @@ def setup_logging() -> None:
             structlog.processors.TimeStamper(fmt="iso"), # Adiciona timestamp
             structlog.processors.StackInfoRenderer(),    # Stack trace
             structlog.processors.format_exc_info,        # Formata exceções
-            structlog.processors.JSONRenderer(),         # Saída JSON
+            structlog.processors.JSONRenderer(
+                indent=2 if is_dev else None,            # Pretty print em dev
+                sort_keys=True,                          # Campos ordenados A-Z
+                ensure_ascii=False,                      # Manter acentos (português)
+            ),
         ],
-        # Filtro de nível: só loga mensagens >= LOG_LEVEL
         wrapper_class=structlog.make_filtering_bound_logger(
-            structlog.get_level_from_name(settings.log_level)
+            logging.getLevelName(settings.log_level.upper())
         ),
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(),
-        cache_logger_on_first_use=True,  # Performance: cacheia loggers
+        cache_logger_on_first_use=True,
     )
 
 

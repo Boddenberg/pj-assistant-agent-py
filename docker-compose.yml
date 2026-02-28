@@ -1,0 +1,44 @@
+# =============================================================================
+# docker-compose.yml — Ambiente local de desenvolvimento
+# =============================================================================
+#
+# Uso:
+#   docker compose up --build        → builda e sobe o serviço
+#   docker compose up -d --build     → em background
+#   docker compose logs -f           → ver logs em tempo real
+#   docker compose down              → parar e remover containers
+#
+# Depois de subir, acesse:
+#   API:     http://localhost:8000
+#   Swagger: http://localhost:8000/docs
+#   Health:  http://localhost:8000/healthz
+#   Metrics: http://localhost:8000/metrics
+# =============================================================================
+
+services:
+  pj-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pj-assistant-agent
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - PORT=8000
+    volumes:
+      # Persiste o ChromaDB entre restarts para não re-ingerir toda vez
+      - chroma_data:/app/data/chroma
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
+
+volumes:
+  chroma_data:
+    driver: local
+

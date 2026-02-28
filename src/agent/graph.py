@@ -72,6 +72,9 @@ from src.core.models import AgentStep, StepType
 from src.agent.state import AgentState
 from src.agent.tools import AGENT_TOOLS
 from src.agent.prompts import SYSTEM_PROMPT
+from src.observability.logging import get_logger
+
+logger = get_logger("graph")
 
 
 # =============================================================================
@@ -102,48 +105,48 @@ def _build_llm() -> ChatOpenAI:
 def planner_node(state: AgentState) -> dict:
     """
     Nó planejador — analisa o contexto do cliente e decide quais tools chamar.
-
-    Recebe:
-      - Mensagens com contexto do cliente (perfil, transações, query)
-
-    Faz:
-      - Chama o LLM com bind_tools (LLM sabe quais tools existem)
-      - LLM decide: chamar tools ou responder direto
-
-    Retorna:
-      - AIMessage com tool_calls (se decidiu usar tools)
-      - AIMessage com content (se decidiu responder direto)
-
-    O roteador (should_continue) decide o próximo passo baseado no retorno.
     """
     start = time.perf_counter()
+    customer_id = state.get("customer_id", "unknown")
 
-    # Criar LLM com as tools disponíveis
-    # bind_tools diz ao LLM: "você pode chamar estas funções"
+    logger.info(
+        "🧠 [GRAPH] PLANNER_START — Nó Planner iniciado",
+        customer_id=customer_id,
+        messages_count=len(state["messages"]),
+        node="planner",
+    )
+
     llm = _build_llm().bind_tools(AGENT_TOOLS)
-
-    # Montar mensagens: System Prompt + histórico de mensagens do estado
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + list(state["messages"])
-
-    # Chamar o LLM — ele vai analisar o contexto e decidir os próximos passos
     response = llm.invoke(messages)
 
-    # Calcular duração para métricas
     duration = (time.perf_counter() - start) * 1000
-
-    # Extrair contagem de tokens (se disponível)
     tokens_in = response.usage_metadata.get("input_tokens", 0) if response.usage_metadata else 0
     tokens_out = response.usage_metadata.get("output_tokens", 0) if response.usage_metadata else 0
 
-    # Registrar o passo para rastreabilidade
+    # Detectar quais tools o LLM decidiu chamar
+    tool_calls = []
+    if hasattr(response, "tool_calls") and response.tool_calls:
+        tool_calls = [tc["name"] for tc in response.tool_calls]
+
+    logger.info(
+        "🧠 [GRAPH] PLANNER_END — Nó Planner finalizado",
+        customer_id=customer_id,
+        node="planner",
+        duration_ms=round(duration, 2),
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        decided_tools=tool_calls if tool_calls else "nenhuma (resposta direta)",
+        num_tool_calls=len(tool_calls),
+        will_route_to="tools" if tool_calls else "synthesizer",
+    )
+
     step = AgentStep(
         step=StepType.PLAN,
         detail="Planejamento: análise do contexto e decisão de ferramentas",
         duration_ms=round(duration, 2),
     )
 
-    # Retornar atualizações do estado
-    # O LangGraph faz merge automático (messages acumula, tokens soma)
     return {
         "messages": [response],
         "steps": state.get("steps", []) + [step],
@@ -159,34 +162,49 @@ def planner_node(state: AgentState) -> dict:
 def executor_node(state: AgentState) -> dict:
     """
     Nó executor — recebe resultados das tools e decide se precisa de mais.
-
-    Fluxo:
-      1. Tools foram executadas → ToolMessages estão no estado
-      2. LLM recebe o histórico completo (incluindo resultados das tools)
-      3. LLM decide:
-         a) Chamar MAIS tools (→ loop de volta para TOOLS)
-         b) Sintetizar resposta (→ vai para SYNTHESIZER)
-
-    Por que separar Planner e Executor?
-      - Planner: decide com base no contexto original
-      - Executor: decide com base nos RESULTADOS das tools
-      - São decisões diferentes que podem ter prompts diferentes no futuro
     """
     start = time.perf_counter()
+    customer_id = state.get("customer_id", "unknown")
 
-    # LLM com tools — pode decidir chamar mais tools
+    # Identificar quais ToolMessages chegaram (resultados das tools)
+    from langchain_core.messages import ToolMessage
+    tool_results = [
+        msg.name for msg in state["messages"]
+        if isinstance(msg, ToolMessage)
+    ]
+
+    logger.info(
+        "⚙️  [GRAPH] EXECUTOR_START — Nó Executor iniciado (analisando resultados de tools)",
+        customer_id=customer_id,
+        node="executor",
+        messages_count=len(state["messages"]),
+        tool_results_received=tool_results,
+    )
+
     llm = _build_llm().bind_tools(AGENT_TOOLS)
-
-    # Histórico completo: system + human + ai (tool_calls) + tool (resultados)
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + list(state["messages"])
-
-    # LLM analisa os resultados das tools e decide próximo passo
     response = llm.invoke(messages)
 
     duration = (time.perf_counter() - start) * 1000
-
     tokens_in = response.usage_metadata.get("input_tokens", 0) if response.usage_metadata else 0
     tokens_out = response.usage_metadata.get("output_tokens", 0) if response.usage_metadata else 0
+
+    # Detectar se vai chamar mais tools ou sintetizar
+    more_tools = []
+    if hasattr(response, "tool_calls") and response.tool_calls:
+        more_tools = [tc["name"] for tc in response.tool_calls]
+
+    logger.info(
+        "⚙️  [GRAPH] EXECUTOR_END — Nó Executor finalizado",
+        customer_id=customer_id,
+        node="executor",
+        duration_ms=round(duration, 2),
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        needs_more_tools=bool(more_tools),
+        next_tools=more_tools if more_tools else "nenhuma",
+        will_route_to="tools" if more_tools else "synthesizer",
+    )
 
     step = AgentStep(
         step=StepType.TOOL_CALL,
@@ -209,34 +227,29 @@ def executor_node(state: AgentState) -> dict:
 def synthesizer_node(state: AgentState) -> dict:
     """
     Nó sintetizador — consolida todas as análises em resposta final.
-
-    Recebe:
-      - Todo o histórico: contexto original + resultados de tools
-
-    Faz:
-      - Chama LLM SEM tools (apenas geração de texto)
-      - Pede uma resposta final estruturada
-      - Formato: Resumo + Análise + Recomendações
-
-    Por que sem tools?
-      - Neste ponto, já temos todas as informações necessárias
-      - O LLM só precisa consolidar e formatar
-      - Remover tools evita que o LLM "invente" mais chamadas desnecessárias
     """
     start = time.perf_counter()
+    customer_id = state.get("customer_id", "unknown")
 
-    # LLM sem tools — apenas geração de texto
-    llm = _build_llm()
-
-    # Instrução de síntese — guia o LLM a consolidar tudo
-    synth_instruction = (
-        "Com base em toda a análise realizada nos passos anteriores, "
-        "gere uma resposta final consolidada para o cliente. "
-        "Inclua: resumo da situação, análise e recomendações personalizadas. "
-        "Seja claro, objetivo e acionável."
+    logger.info(
+        "✍️  [GRAPH] SYNTHESIZER_START — Nó Synthesizer iniciado (gerando resposta final)",
+        customer_id=customer_id,
+        node="synthesizer",
+        messages_count=len(state["messages"]),
+        steps_so_far=len(state.get("steps", [])),
+        accumulated_tokens_in=state.get("tokens_in", 0),
+        accumulated_tokens_out=state.get("tokens_out", 0),
     )
 
-    # Montar mensagens: system + histórico + instrução de síntese
+    llm = _build_llm()
+
+    synth_instruction = (
+        "Agora gere a resposta final para o cliente no chat do app. "
+        "Lembre-se: é um CHAT, não um email. Seja direto, conversacional e curto. "
+        "Não use formato de relatório. Não assine a mensagem. "
+        "Vá direto ao ponto com os dados que você já analisou."
+    )
+
     messages = (
         [SystemMessage(content=SYSTEM_PROMPT)]
         + list(state["messages"])
@@ -246,9 +259,21 @@ def synthesizer_node(state: AgentState) -> dict:
     response = llm.invoke(messages)
 
     duration = (time.perf_counter() - start) * 1000
-
     tokens_in = response.usage_metadata.get("input_tokens", 0) if response.usage_metadata else 0
     tokens_out = response.usage_metadata.get("output_tokens", 0) if response.usage_metadata else 0
+
+    answer_preview = response.content[:150] if hasattr(response, "content") else "N/A"
+
+    logger.info(
+        "✍️  [GRAPH] SYNTHESIZER_END — Nó Synthesizer finalizado (resposta gerada)",
+        customer_id=customer_id,
+        node="synthesizer",
+        duration_ms=round(duration, 2),
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        answer_length=len(response.content) if hasattr(response, "content") else 0,
+        answer_preview=answer_preview + "..." if len(answer_preview) >= 150 else answer_preview,
+    )
 
     step = AgentStep(
         step=StepType.SYNTHESIZE,
@@ -271,22 +296,25 @@ def synthesizer_node(state: AgentState) -> dict:
 def should_continue(state: AgentState) -> str:
     """
     Decide se o agente deve continuar chamando tools ou sintetizar.
-
-    Lógica simples:
-      - Se a última mensagem do LLM tem tool_calls → ir para TOOLS
-      - Se não tem tool_calls → ir para SYNTHESIZER
-
-    Essa função é usada como conditional_edge no grafo.
-    O LangGraph chama ela após cada nó e usa o retorno para
-    decidir qual aresta seguir.
     """
     last_message = state["messages"][-1]
+    customer_id = state.get("customer_id", "unknown")
 
-    # AIMessage com tool_calls → LLM quer chamar tools
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+        tools_requested = [tc["name"] for tc in last_message.tool_calls]
+        logger.info(
+            "🔀 [GRAPH] ROUTER → tools — LLM quer chamar ferramentas",
+            customer_id=customer_id,
+            decision="tools",
+            tools_requested=tools_requested,
+        )
         return "tools"
 
-    # Sem tool_calls → LLM terminou, hora de sintetizar
+    logger.info(
+        "🔀 [GRAPH] ROUTER → synthesizer — LLM pronto para sintetizar",
+        customer_id=customer_id,
+        decision="synthesize",
+    )
     return "synthesize"
 
 

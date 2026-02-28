@@ -24,10 +24,14 @@ claras e descritivas — o LLM usa isso para decidir quando chamar.
 from __future__ import annotations
 
 import json
+import time
 from langchain_core.tools import tool
 
 from src.core.models import CustomerProfile, Transaction
 from src.rag.retriever import retrieve
+from src.observability.logging import get_logger
+
+logger = get_logger("tools")
 
 
 # =============================================================================
@@ -41,36 +45,44 @@ def analyze_transactions(transactions_json: str) -> str:
     Args:
         transactions_json: JSON string com lista de transações do cliente.
     """
-    # ─── Passo 1: Parsear o JSON das transações ─────────────────────
-    # O LLM envia as transações como JSON string.
-    # Precisamos converter para objetos Transaction para processar.
+    start = time.perf_counter()
+    logger.info(
+        "🔧 [TOOL] ANALYZE_TRANSACTIONS_START — Analisando transações",
+        tool="analyze_transactions",
+        input_length=len(transactions_json),
+    )
+
     try:
         raw = json.loads(transactions_json)
         transactions = [Transaction(**t) for t in raw]
-    except Exception:
+    except Exception as e:
+        logger.error(
+            "🔧 [TOOL] ANALYZE_TRANSACTIONS_ERROR — Falha ao parsear JSON",
+            tool="analyze_transactions",
+            error=str(e),
+        )
         return "Erro: não foi possível processar as transações."
 
-    # Sem transações → retorna mensagem clara
     if not transactions:
+        logger.info(
+            "🔧 [TOOL] ANALYZE_TRANSACTIONS_END — Nenhuma transação",
+            tool="analyze_transactions",
+            num_transactions=0,
+        )
         return "Nenhuma transação disponível para análise."
 
-    # ─── Passo 2: Calcular métricas ────────────────────────────────
-    # Total movimentado (entradas + saídas)
     total = sum(t.amount for t in transactions)
 
-    # Agrupar por categoria e somar valores
     by_category: dict[str, float] = {}
     for t in transactions:
         by_category[t.category] = by_category.get(t.category, 0) + t.amount
 
-    # Ordenar por valor absoluto (maiores movimentações primeiro)
     top_categories = sorted(
         by_category.items(),
         key=lambda x: abs(x[1]),
         reverse=True,
     )[:5]
 
-    # ─── Passo 3: Montar resposta legível ──────────────────────────
     lines = [
         f"Total movimentado: R$ {total:,.2f}",
         f"Quantidade de transações: {len(transactions)}",
@@ -79,7 +91,20 @@ def analyze_transactions(transactions_json: str) -> str:
     for cat, val in top_categories:
         lines.append(f"  - {cat}: R$ {val:,.2f}")
 
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    duration = (time.perf_counter() - start) * 1000
+
+    logger.info(
+        "🔧 [TOOL] ANALYZE_TRANSACTIONS_END — Análise concluída",
+        tool="analyze_transactions",
+        num_transactions=len(transactions),
+        total_amount=round(total, 2),
+        num_categories=len(by_category),
+        top_categories=[cat for cat, _ in top_categories],
+        duration_ms=round(duration, 2),
+    )
+
+    return result
 
 
 # =============================================================================
@@ -93,18 +118,45 @@ def search_knowledge_base(query: str) -> str:
     Args:
         query: Pergunta ou tema para buscar na base de conhecimento.
     """
-    # Chamar o retriever que faz busca semântica no ChromaDB
+    start = time.perf_counter()
+    logger.info(
+        "🔧 [TOOL] SEARCH_KB_START — Buscando na base de conhecimento (RAG)",
+        tool="search_knowledge_base",
+        query=query,
+        query_length=len(query),
+    )
+
     results = retrieve(query)
 
-    # Sem resultados → mensagem clara para o LLM não alucinar
+    duration = (time.perf_counter() - start) * 1000
+
     if not results:
+        logger.info(
+            "🔧 [TOOL] SEARCH_KB_END — Nenhum resultado encontrado",
+            tool="search_knowledge_base",
+            query=query,
+            num_results=0,
+            duration_ms=round(duration, 2),
+        )
         return "Nenhum documento relevante encontrado na base de conhecimento."
 
-    # Formatar resultados com score de relevância
-    # O LLM recebe isso como contexto para gerar a resposta
     parts = []
     for r in results:
         parts.append(f"[relevância={r['score']}] {r['content']}")
+
+    sources = [r.get("source", "unknown") for r in results]
+    scores = [r["score"] for r in results]
+
+    logger.info(
+        "🔧 [TOOL] SEARCH_KB_END — Resultados encontrados",
+        tool="search_knowledge_base",
+        query=query,
+        num_results=len(results),
+        sources=sources,
+        relevance_scores=scores,
+        best_score=max(scores) if scores else 0,
+        duration_ms=round(duration, 2),
+    )
 
     return "\n---\n".join(parts)
 
@@ -120,17 +172,23 @@ def assess_credit_profile(profile_json: str) -> str:
     Args:
         profile_json: JSON string com dados do perfil do cliente.
     """
-    # ─── Parsear o JSON do perfil ──────────────────────────────────
+    start = time.perf_counter()
+    logger.info(
+        "🔧 [TOOL] ASSESS_CREDIT_START — Avaliando perfil de crédito",
+        tool="assess_credit_profile",
+        input_length=len(profile_json),
+    )
+
     try:
         profile = CustomerProfile(**json.loads(profile_json))
-    except Exception:
+    except Exception as e:
+        logger.error(
+            "🔧 [TOOL] ASSESS_CREDIT_ERROR — Falha ao parsear JSON do perfil",
+            tool="assess_credit_profile",
+            error=str(e),
+        )
         return "Erro: não foi possível processar o perfil."
 
-    # ─── Classificar risco ─────────────────────────────────────────
-    # Faixas de risco baseadas no credit_score:
-    #   700+ → baixo (acesso a todas as linhas, melhores taxas)
-    #   500-699 → médio (acesso com garantias adicionais)
-    #   <500 → alto (análise caso a caso)
     if profile.credit_score >= 700:
         risk = "baixo"
     elif profile.credit_score >= 500:
@@ -138,14 +196,27 @@ def assess_credit_profile(profile_json: str) -> str:
     else:
         risk = "alto"
 
-    # ─── Montar resposta estruturada ───────────────────────────────
-    return (
+    result = (
         f"Empresa: {profile.company_name}\n"
         f"Segmento: {profile.segment}\n"
         f"Faixa de faturamento: {profile.revenue_range}\n"
         f"Score de crédito: {profile.credit_score} (risco {risk})\n"
         f"Cliente desde: {profile.account_since}"
     )
+
+    duration = (time.perf_counter() - start) * 1000
+
+    logger.info(
+        "🔧 [TOOL] ASSESS_CREDIT_END — Avaliação de crédito concluída",
+        tool="assess_credit_profile",
+        company_name=profile.company_name,
+        segment=profile.segment,
+        credit_score=profile.credit_score,
+        risk_level=risk,
+        duration_ms=round(duration, 2),
+    )
+
+    return result
 
 
 # =============================================================================

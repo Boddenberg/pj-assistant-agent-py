@@ -32,6 +32,9 @@ import re
 
 from src.core.config import settings
 from src.core.exceptions import InputValidationError
+from src.observability.logging import get_logger
+
+logger = get_logger("security.sanitizer")
 
 
 # =============================================================================
@@ -92,44 +95,60 @@ SENSITIVE_PATTERNS = {
 def validate_input(text: str) -> str:
     """
     Valida e sanitiza a entrada do usuário.
-
-    Pipeline de validação:
-      1. Verifica se não está vazio
-      2. Verifica tamanho máximo
-      3. Remove caracteres de controle
-      4. Detecta prompt injection
-
-    Args:
-        text: Texto de entrada do usuário (query).
-
-    Returns:
-        Texto sanitizado e validado.
-
-    Raises:
-        InputValidationError: Se o input for inválido ou suspeito.
     """
+    logger.info(
+        "🛡️  [SECURITY] VALIDATE_START — Validando input do usuário",
+        input_length=len(text) if text else 0,
+        max_allowed=settings.max_input_length,
+    )
+
     # ─── Check 1: Vazio ────────────────────────────────────────────
     if not text or not text.strip():
+        logger.warning(
+            "🛡️  [SECURITY] VALIDATE_REJECTED — Input vazio",
+            reason="empty_input",
+        )
         raise InputValidationError("Input vazio.")
 
     # ─── Check 2: Tamanho máximo ───────────────────────────────────
     if len(text) > settings.max_input_length:
+        logger.warning(
+            "🛡️  [SECURITY] VALIDATE_REJECTED — Input excede tamanho máximo",
+            reason="max_length_exceeded",
+            input_length=len(text),
+            max_allowed=settings.max_input_length,
+        )
         raise InputValidationError(
             f"Input excede o limite de {settings.max_input_length} caracteres."
         )
 
     # ─── Check 3: Caracteres de controle ───────────────────────────
-    # Remove \x00 a \x08, \x0b, \x0c, \x0e a \x1f, \x7f
-    # Mantém: \x09 (tab), \x0a (newline), \x0d (carriage return)
-    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    if len(cleaned) != len(text):
+        logger.info(
+            "🛡️  [SECURITY] VALIDATE_CLEANED — Caracteres de controle removidos",
+            chars_removed=len(text) - len(cleaned),
+        )
+    text = cleaned
 
     # ─── Check 4: Prompt injection ─────────────────────────────────
     text_lower = text.lower()
     for pattern in INJECTION_PATTERNS:
         if re.search(pattern, text_lower, re.IGNORECASE):
+            logger.warning(
+                "🛡️  [SECURITY] VALIDATE_REJECTED — Prompt injection detectado!",
+                reason="prompt_injection",
+                matched_pattern=pattern,
+                input_preview=text[:80],
+            )
             raise InputValidationError(
                 "Input contém padrão suspeito de prompt injection."
             )
+
+    logger.info(
+        "🛡️  [SECURITY] VALIDATE_PASSED — Input aprovado em todas as verificações",
+        validated_length=len(text),
+    )
 
     return text
 
@@ -137,18 +156,22 @@ def validate_input(text: str) -> str:
 def mask_sensitive_data(text: str) -> str:
     """
     Mascara dados sensíveis no texto antes de enviar ao LLM.
-
-    Por que mascarar?
-      - O LLM não precisa do CPF real para dar recomendações financeiras
-      - Evita que dados sensíveis fiquem nos logs do provedor LLM
-      - Compliance com LGPD (Lei Geral de Proteção de Dados)
-
-    Args:
-        text: Texto que pode conter dados sensíveis.
-
-    Returns:
-        Texto com dados sensíveis mascarados.
     """
-    for _name, (pattern, replacement) in SENSITIVE_PATTERNS.items():
+    masked_types = []
+    for name, (pattern, replacement) in SENSITIVE_PATTERNS.items():
+        matches = re.findall(pattern, text)
+        if matches:
+            masked_types.append(f"{name}({len(matches)})")
         text = re.sub(pattern, replacement, text)
+
+    if masked_types:
+        logger.info(
+            "🛡️  [SECURITY] PII_MASKED — Dados sensíveis mascarados",
+            masked_types=masked_types,
+        )
+    else:
+        logger.info(
+            "🛡️  [SECURITY] PII_CLEAN — Nenhum dado sensível detectado",
+        )
+
     return text

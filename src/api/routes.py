@@ -93,34 +93,79 @@ async def assistant(request: AssistantRequest) -> AssistantResponse:
     # Marca o início para calcular latência
     start = time.perf_counter()
 
+    # ═══════════════════════════════════════════════════════════════
+    # LOG: REQUEST RECEBIDA
+    # ═══════════════════════════════════════════════════════════════
+    logger.info(
+        "📥 [1/6] REQUEST_RECEIVED — Nova requisição recebida",
+        customer_id=request.customer_id,
+        company_name=request.profile.company_name,
+        query=request.query[:100] + ("..." if len(request.query) > 100 else ""),
+        query_length=len(request.query),
+        num_transactions=len(request.transactions),
+        segment=request.profile.segment,
+        credit_score=request.profile.credit_score,
+    )
+
     # Cria um span OpenTelemetry para rastreamento distribuído.
-    # O trace_id propaga do BFA → Agente → LLM permitindo
-    # visualizar a request inteira no Jaeger/Tempo.
     with tracer.start_as_current_span("assistant_request") as span:
-        # Atributos do span — aparecem no trace para debugging
         span.set_attribute("customer_id", request.customer_id)
 
         try:
             # ─────────────────────────────────────────────────────
             # PASSO 1: Validar e sanitizar input
             # ─────────────────────────────────────────────────────
-            # validate_input: checa tamanho, prompt injection
-            # mask_sensitive_data: mascara CPF, CNPJ, etc.
+            validation_start = time.perf_counter()
             request.query = validate_input(request.query)
             request.query = mask_sensitive_data(request.query)
+            validation_duration = (time.perf_counter() - validation_start) * 1000
+
+            logger.info(
+                "🛡️  [2/6] INPUT_VALIDATED — Input validado e sanitizado",
+                customer_id=request.customer_id,
+                sanitized_query=request.query[:100] + ("..." if len(request.query) > 100 else ""),
+                validation_duration_ms=round(validation_duration, 2),
+            )
 
             # ─────────────────────────────────────────────────────
             # PASSO 2: Executar o agente
             # ─────────────────────────────────────────────────────
-            # run_agent é o facade que invoca o grafo LangGraph.
-            # Retorna AssistantResponse com answer, sources, etc.
+            agent_start = time.perf_counter()
+
+            logger.info(
+                "🤖 [3/6] AGENT_STARTED — Iniciando execução do agente LangGraph",
+                customer_id=request.customer_id,
+                llm_model=settings.llm_model,
+                llm_temperature=settings.llm_temperature,
+                max_tokens=settings.max_tokens_per_request,
+            )
+
             response = await run_agent(request)
+
+            agent_duration = (time.perf_counter() - agent_start) * 1000
+
+            logger.info(
+                "✅ [4/6] AGENT_COMPLETED — Agente finalizou execução",
+                customer_id=request.customer_id,
+                agent_duration_ms=round(agent_duration, 2),
+                tokens_used=response.tokens_used,
+                estimated_cost_usd=response.estimated_cost_usd,
+                num_reasoning_steps=len(response.reasoning),
+                num_sources=len(response.sources),
+                answer_length=len(response.answer),
+            )
 
             # ─────────────────────────────────────────────────────
             # PASSO 3: Verificar limite de custo
             # ─────────────────────────────────────────────────────
-            # Proteção contra requests caras demais (ex: loop infinito).
-            # O limite é configurável via MAX_COST_PER_REQUEST_USD.
+            logger.info(
+                "💰 [5/6] COST_CHECK — Verificando limite de custo",
+                customer_id=request.customer_id,
+                estimated_cost_usd=response.estimated_cost_usd,
+                cost_limit_usd=settings.max_cost_per_request_usd,
+                within_limit=response.estimated_cost_usd <= settings.max_cost_per_request_usd,
+            )
+
             if response.estimated_cost_usd > settings.max_cost_per_request_usd:
                 raise CostLimitExceededError(
                     f"Custo estimado ({response.estimated_cost_usd}) excede limite "
@@ -132,24 +177,26 @@ async def assistant(request: AssistantRequest) -> AssistantResponse:
             # ─────────────────────────────────────────────────────
             duration = time.perf_counter() - start
 
-            # Counters e histograms do Prometheus
             REQUEST_COUNT.labels(status="success").inc()
             REQUEST_LATENCY.observe(duration)
             TOKENS_USED.labels(direction="input").inc(response.tokens_used)
             ESTIMATED_COST.observe(response.estimated_cost_usd)
 
-            # Atributos do span — enriquecem o trace
             span.set_attribute("tokens_used", response.tokens_used)
             span.set_attribute("cost_usd", response.estimated_cost_usd)
             span.set_attribute("duration_s", round(duration, 3))
 
-            # Log estruturado — aparece no stdout como JSON
             logger.info(
-                "request_completed",
+                "📤 [6/6] REQUEST_COMPLETED — Resposta enviada com sucesso",
                 customer_id=request.customer_id,
-                tokens=response.tokens_used,
-                cost_usd=response.estimated_cost_usd,
-                duration_s=round(duration, 3),
+                status="success",
+                total_duration_s=round(duration, 3),
+                total_duration_ms=round(duration * 1000, 2),
+                tokens_used=response.tokens_used,
+                estimated_cost_usd=response.estimated_cost_usd,
+                num_reasoning_steps=len(response.reasoning),
+                num_sources=len(response.sources),
+                answer_preview=response.answer[:150] + ("..." if len(response.answer) > 150 else ""),
             )
 
             return response
@@ -159,48 +206,54 @@ async def assistant(request: AssistantRequest) -> AssistantResponse:
         # ─────────────────────────────────────────────────────────
 
         except InputValidationError as e:
-            # 400 — input do usuário é inválido (vazio, injection, etc.)
+            duration = time.perf_counter() - start
             REQUEST_COUNT.labels(status="validation_error").inc()
             logger.warning(
-                "input_validation_error",
-                error=str(e),
+                "🚫 [ERRO] VALIDATION_FAILED — Input rejeitado na validação",
                 customer_id=request.customer_id,
+                error=str(e),
+                query_preview=request.query[:80],
+                duration_ms=round(duration * 1000, 2),
             )
             raise HTTPException(status_code=400, detail=str(e))
 
         except CostLimitExceededError as e:
-            # 429 — custo estimado excede o limite configurado.
-            # Usamos 429 (Too Many Requests) por ser rate-limiting de custo.
+            duration = time.perf_counter() - start
             REQUEST_COUNT.labels(status="cost_limit").inc()
             logger.warning(
-                "cost_limit_exceeded",
-                error=str(e),
+                "💸 [ERRO] COST_LIMIT_EXCEEDED — Custo excedeu limite permitido",
                 customer_id=request.customer_id,
+                error=str(e),
+                estimated_cost_usd=response.estimated_cost_usd if 'response' in dir() else "N/A",
+                cost_limit_usd=settings.max_cost_per_request_usd,
+                duration_ms=round(duration * 1000, 2),
             )
             raise HTTPException(status_code=429, detail=str(e))
 
         except AgentError as e:
-            # 500 — erro conhecido do agente (LLM, RAG, tool).
-            # Registra qual modelo falhou para monitoramento.
+            duration = time.perf_counter() - start
             REQUEST_COUNT.labels(status="agent_error").inc()
             MODEL_ERRORS.labels(model=settings.llm_model).inc()
             logger.error(
-                "agent_error",
-                error=str(e),
+                "🔥 [ERRO] AGENT_ERROR — Erro na execução do agente",
                 customer_id=request.customer_id,
+                error=str(e),
+                error_type=type(e).__name__,
+                llm_model=settings.llm_model,
+                duration_ms=round(duration * 1000, 2),
             )
-            # NÃO expor detalhes internos ao cliente (segurança)
             raise HTTPException(status_code=500, detail="Erro interno do agente.")
 
         except Exception as e:
-            # 500 — erro totalmente inesperado (bug, dependência caiu, etc.).
-            # Incrementa fallback_count para alertar que algo está muito errado.
+            duration = time.perf_counter() - start
             REQUEST_COUNT.labels(status="error").inc()
             FALLBACK_COUNT.inc()
             logger.error(
-                "unexpected_error",
-                error=str(e),
+                "💥 [ERRO] UNEXPECTED_ERROR — Erro inesperado não tratado",
                 customer_id=request.customer_id,
+                error=str(e),
+                error_type=type(e).__name__,
+                duration_ms=round(duration * 1000, 2),
             )
             raise HTTPException(status_code=500, detail="Erro interno inesperado.")
 

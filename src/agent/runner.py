@@ -20,6 +20,7 @@ Por que uma fachada?
 from __future__ import annotations
 
 import json
+import re
 import time
 
 from langchain_core.messages import HumanMessage
@@ -153,9 +154,17 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
         messages=output_messages,
     )
 
-    # ─── Passo 4: Extrair resposta ─────────────────────────────────
+    # ─── Passo 4: Extrair resposta e context ───────────────────────
     final_message = result["messages"][-1]
-    answer = final_message.content if hasattr(final_message, "content") else str(final_message)
+    raw_answer = final_message.content if hasattr(final_message, "content") else str(final_message)
+
+    # Extrair context da resposta do LLM.
+    # O LLM inclui [CONTEXT:xxx] na última linha — o BFA usa esse valor
+    # no strategy pattern para decidir qual fluxo executar no lado Go.
+    # Regex captura o valor e remove a tag da resposta visível ao cliente.
+    context_match = re.search(r"\[CONTEXT:(\w+)\]", raw_answer)
+    context = context_match.group(1) if context_match else None
+    answer = re.sub(r"\s*\[CONTEXT:\w+\]\s*", "", raw_answer).strip()
 
     tokens_in = result.get("tokens_in", 0)
     tokens_out = result.get("tokens_out", 0)
@@ -166,6 +175,7 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
         "📦 [RUNNER 4/4] RESPONSE_PACKED — Resposta empacotada para a API",
         customer_id=request.customer_id,
         answer_length=len(answer),
+        context=context,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         total_tokens=total_tokens,
@@ -178,6 +188,7 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
     return AgentResponse(
         customer_id=request.customer_id,
         answer=answer,
+        context=context,
         reasoning=result.get("steps", []),
         sources=result.get("sources", []),
         tokens_used=total_tokens,

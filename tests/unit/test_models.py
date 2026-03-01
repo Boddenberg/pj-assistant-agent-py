@@ -100,6 +100,20 @@ class TestAgentResponse:
         # Tokens default = 0 (ainda não processou nada)
         assert r.tokens_used == 0
 
+        # Context default = None (sem ação no BFA)
+        assert r.context is None
+
+    def test_response_with_context(self):
+        """Response com context deve propagar para o BFA usar no strategy pattern."""
+        r = AgentResponse(
+            customer_id="x",
+            answer="Vou te ajudar a abrir sua conta!",
+            context="onboarding",
+        )
+
+        # Context deve ser exatamente o valor informado
+        assert r.context == "onboarding"
+
     def test_response_with_steps(self):
         """Response com reasoning steps deve preservar a sequência."""
         step = AgentStep(

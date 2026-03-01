@@ -6,12 +6,67 @@ A conta PJ é uma conta bancária digital voltada para empresas e empreendedores
 
 ## Tipos de Conta
 
-O banco oferece o seguinte tipo de conta PJ:
+O banco oferece os seguintes tipos de conta PJ:
 
 - **Conta Corrente (checking)**: conta padrão para movimentações diárias do negócio.
 - **Conta Poupança (savings)**: conta para reservas e aplicações da empresa.
 - **Conta de Pagamento (payment)**: conta específica para recebimentos e pagamentos.
 - **Conta Escrow (escrow)**: conta garantia para operações que exigem custódia de valores.
+
+## Abertura de Conta PJ — Fluxo de Onboarding
+
+**Context para o BFA: `onboarding`**
+
+Quando o cliente demonstra intenção de abrir uma conta PJ, o agente deve:
+1. Informar os requisitos e o processo de forma conversacional.
+2. Retornar o context `onboarding` na resposta para que o BFA acione o fluxo adequado via strategy.
+
+### Quem pode abrir
+
+- Empresas com CNPJ ativo na Receita Federal.
+- Todos os tipos empresariais: MEI, ME, EPP, LTDA, S/A, EIRELI.
+- O representante legal precisa ser maior de 18 anos e ter CPF regular.
+
+### Documentos necessários
+
+| Documento | Detalhe |
+|---|---|
+| CNPJ | Cadastro ativo e regular na Receita Federal |
+| Contrato Social ou Requerimento de Empresário | Documento de constituição da empresa |
+| Documento do representante legal | RG ou CNH válidos |
+| CPF do representante legal | Regular na Receita Federal |
+| Comprovante de endereço da empresa | Emitido nos últimos 90 dias |
+
+Para MEI, basta o Certificado de Condição de Microempreendedor Individual (CCMEI).
+
+### Etapas do onboarding
+
+1. **Coleta de dados**: cliente informa CNPJ, dados do representante legal e da empresa.
+2. **Validação documental**: verificação automática do CNPJ na Receita Federal e do CPF do representante.
+3. **Análise de compliance**: checagem em listas restritivas (PEP, sanções, OFAC).
+4. **Escolha do tipo de conta**: cliente seleciona o tipo de conta desejado (checking, savings, payment, escrow).
+5. **Criação da conta**: conta criada com status `pending_activation`.
+6. **Ativação**: após confirmação por e-mail ou token, a conta passa para status `active`.
+
+### Prazo de abertura
+
+- **Análise automática (maioria dos casos)**: conta criada em até 24 horas úteis.
+- **Análise manual (casos com pendência documental)**: até 5 dias úteis.
+- O cliente recebe notificação por e-mail e push no app sobre o status.
+
+### Taxas de abertura
+
+- A abertura de conta PJ é **gratuita** — não há cobrança de tarifa para abrir.
+- Cada tipo de conta pode ter tarifas de manutenção mensal, que são informadas no ato da abertura.
+
+### Perguntas frequentes sobre abertura
+
+- **"Quanto custa abrir uma conta PJ?"** → Gratuito. Sem taxa de abertura.
+- **"Quanto tempo demora?"** → Até 24h úteis na maioria dos casos.
+- **"Preciso ir à agência?"** → Não. O processo é 100% digital pelo app.
+- **"MEI pode abrir?"** → Sim. Basta ter o CCMEI.
+- **"Posso ter mais de uma conta PJ?"** → Sim. Cada CNPJ pode ter múltiplas contas de tipos diferentes.
+- **"O que acontece depois de abrir?"** → A conta fica em `pending_activation`. Após confirmação, vira `active`.
 
 ## Status da Conta
 

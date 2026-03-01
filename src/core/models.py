@@ -124,6 +124,11 @@ class AgentResponse(BaseModel):
     Contém a resposta textual + metadados de observabilidade.
     O BFA repassa ao front, que renderiza para o cliente.
 
+    O campo `context` é usado pelo BFA para strategy pattern:
+      - O BFA recebe o context (ex: "onboarding", "credit_analysis")
+      - Usa strategy para decidir qual ação executar no lado Go
+      - O agente NÃO chama endpoints — apenas retorna o context
+
     Campos de observabilidade (tokens_used, estimated_cost_usd):
       - Permitem ao BFA monitorar custos
       - O front pode exibir "powered by AI" com métricas
@@ -131,6 +136,7 @@ class AgentResponse(BaseModel):
     """
     customer_id: str                                    # ID do cliente
     answer: str                                         # Resposta textual do agente
+    context: str | None = None                          # Context para strategy no BFA (ex: "onboarding")
     reasoning: list[AgentStep] = Field(                 # Passos executados (justificativa)
         default_factory=list,
     )

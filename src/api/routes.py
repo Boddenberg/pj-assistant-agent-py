@@ -148,11 +148,14 @@ async def chat(request: AgentRequest) -> AgentResponse:
                 "✅ [4/6] AGENT_COMPLETED — Agente finalizou execução",
                 customer_id=request.customer_id,
                 agent_duration_ms=round(agent_duration, 2),
-                tokens_used=response.tokens_used,
-                estimated_cost_usd=response.estimated_cost_usd,
-                num_reasoning_steps=len(response.reasoning),
-                num_sources=len(response.sources),
+                tokens_used=response.metadata.tokens_used,
+                estimated_cost_usd=response.metadata.estimated_cost_usd,
+                num_reasoning_steps=len(response.metadata.reasoning),
+                num_sources=len(response.metadata.sources),
                 answer_length=len(response.answer),
+                context=response.context,
+                intent=response.intent,
+                confidence=response.confidence,
             )
 
             # ─────────────────────────────────────────────────────
@@ -161,14 +164,14 @@ async def chat(request: AgentRequest) -> AgentResponse:
             logger.info(
                 "💰 [5/6] COST_CHECK — Verificando limite de custo",
                 customer_id=request.customer_id,
-                estimated_cost_usd=response.estimated_cost_usd,
+                estimated_cost_usd=response.metadata.estimated_cost_usd,
                 cost_limit_usd=settings.max_cost_per_request_usd,
-                within_limit=response.estimated_cost_usd <= settings.max_cost_per_request_usd,
+                within_limit=response.metadata.estimated_cost_usd <= settings.max_cost_per_request_usd,
             )
 
-            if response.estimated_cost_usd > settings.max_cost_per_request_usd:
+            if response.metadata.estimated_cost_usd > settings.max_cost_per_request_usd:
                 raise CostLimitExceededError(
-                    f"Custo estimado ({response.estimated_cost_usd}) excede limite "
+                    f"Custo estimado ({response.metadata.estimated_cost_usd}) excede limite "
                     f"({settings.max_cost_per_request_usd})"
                 )
 
@@ -179,11 +182,11 @@ async def chat(request: AgentRequest) -> AgentResponse:
 
             REQUEST_COUNT.labels(status="success").inc()
             REQUEST_LATENCY.observe(duration)
-            TOKENS_USED.labels(direction="input").inc(response.tokens_used)
-            ESTIMATED_COST.observe(response.estimated_cost_usd)
+            TOKENS_USED.labels(direction="input").inc(response.metadata.tokens_used)
+            ESTIMATED_COST.observe(response.metadata.estimated_cost_usd)
 
-            span.set_attribute("tokens_used", response.tokens_used)
-            span.set_attribute("cost_usd", response.estimated_cost_usd)
+            span.set_attribute("tokens_used", response.metadata.tokens_used)
+            span.set_attribute("cost_usd", response.metadata.estimated_cost_usd)
             span.set_attribute("duration_s", round(duration, 3))
 
             logger.info(
@@ -192,10 +195,13 @@ async def chat(request: AgentRequest) -> AgentResponse:
                 status="success",
                 total_duration_s=round(duration, 3),
                 total_duration_ms=round(duration * 1000, 2),
-                tokens_used=response.tokens_used,
-                estimated_cost_usd=response.estimated_cost_usd,
-                num_reasoning_steps=len(response.reasoning),
-                num_sources=len(response.sources),
+                tokens_used=response.metadata.tokens_used,
+                estimated_cost_usd=response.metadata.estimated_cost_usd,
+                num_reasoning_steps=len(response.metadata.reasoning),
+                num_sources=len(response.metadata.sources),
+                context=response.context,
+                intent=response.intent,
+                confidence=response.confidence,
                 answer_preview=response.answer[:150] + ("..." if len(response.answer) > 150 else ""),
             )
 
@@ -224,7 +230,7 @@ async def chat(request: AgentRequest) -> AgentResponse:
                 "💸 [ERRO] COST_LIMIT_EXCEEDED — Custo excedeu limite permitido",
                 customer_id=request.customer_id,
                 error=str(e),
-                estimated_cost_usd=response.estimated_cost_usd if 'response' in dir() else "N/A",
+                estimated_cost_usd=response.metadata.estimated_cost_usd if 'response' in dir() else "N/A",
                 cost_limit_usd=settings.max_cost_per_request_usd,
                 duration_ms=round(duration * 1000, 2),
             )

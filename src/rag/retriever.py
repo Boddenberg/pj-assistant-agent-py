@@ -9,7 +9,7 @@ Fluxo:
   5. Retorna apenas os chunks relevantes
 
 Como evitar contexto irrelevante?
-  - SIMILARITY_THRESHOLD = 0.3 → descarta chunks com baixa similaridade
+  - SIMILARITY_THRESHOLD = 0.2 → descarta chunks com baixa similaridade
   - Se a query não tem relação com nenhum documento, retorna lista vazia
   - O agente recebe "nada encontrado" e não alucina com contexto ruim
 
@@ -29,7 +29,7 @@ from src.observability.logging import get_logger
 
 logger = get_logger("rag.retriever")
 
-SIMILARITY_THRESHOLD = 0.3
+SIMILARITY_THRESHOLD = 0.2
 
 
 def retrieve(query: str, top_k: int | None = None) -> list[dict]:

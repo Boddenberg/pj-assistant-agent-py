@@ -83,6 +83,10 @@ def ingest(chunks: list) -> None:
     """
     Ingere uma lista de chunks no vector store.
 
+    IMPORTANTE: limpa a coleção inteira antes de re-ingerir.
+    Isso evita acúmulo de chunks antigos/duplicados que causam
+    alucinação — o LLM recebia contexto de documentos removidos.
+
     Para cada chunk, o ChromaDB:
       1. Gera o embedding usando o modelo configurado
       2. Armazena texto + embedding + metadados
@@ -91,7 +95,23 @@ def ingest(chunks: list) -> None:
     Args:
         chunks: Lista de Document objects (saída do chunker).
     """
+    global _vectorstore
+
     store = get_vectorstore()
     if not chunks:
         return
+
+    # Limpar coleção antes de re-ingerir.
+    # Sem isso, cada ingestão acumula chunks — inclusive de arquivos
+    # que já foram removidos do knowledge_base/.
+    # Foi a causa raiz de alucinação: o RAG retornava chunks de um
+    # faq_pj.md antigo que falava "contrato social" e "documentos dos sócios".
+    existing = store._collection.count()
+    if existing > 0:
+        # Pegar todos os IDs e deletar — ChromaDB não aceita where={} vazio.
+        all_ids = store._collection.get()["ids"]
+        store._collection.delete(ids=all_ids)
+        _vectorstore = None                 # Forçar recriar o singleton
+        store = get_vectorstore()           # Reconecta limpo
+
     store.add_documents(chunks)

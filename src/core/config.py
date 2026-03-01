@@ -49,11 +49,13 @@ class Settings(BaseSettings):
     embedding_model: str = Field(default="all-MiniLM-L6-v2")
 
     # Tamanho de cada chunk em caracteres.
-    # 512 = ~128 tokens → bom equilíbrio entre contexto e precisão.
-    chunk_size: int = Field(default=512)
+    # 1024 = ~256 tokens → garante que tabelas markdown e seções
+    # inteiras cabem em um único chunk (512 cortava tabelas ao meio).
+    chunk_size: int = Field(default=1024)
 
     # Overlap entre chunks para não perder informação nas bordas.
-    chunk_overlap: int = Field(default=64)
+    # 128 chars com chunks de 1024 = ~12% de sobreposição.
+    chunk_overlap: int = Field(default=128)
 
     # Quantos chunks retornar na busca semântica.
     rag_top_k: int = Field(default=5)

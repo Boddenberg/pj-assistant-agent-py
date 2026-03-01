@@ -8,7 +8,7 @@ Isso garante:
   - Documentação via OpenAPI (FastAPI gera docs automaticamente)
 
 Fluxo dos dados:
-  BFA (Go) → AssistantRequest → [Agente] → AssistantResponse → BFA (Go)
+  BFA (Go) → AgentRequest → [Agente] → AgentResponse → BFA (Go)
 """
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ class AgentStep(BaseModel):
 # Contratos de Entrada/Saída — interface com o BFA
 # =============================================================================
 
-class AssistantRequest(BaseModel):
+class AgentRequest(BaseModel):
     """
     Payload de entrada do agente.
 
@@ -117,7 +117,7 @@ class AssistantRequest(BaseModel):
     )
 
 
-class AssistantResponse(BaseModel):
+class AgentResponse(BaseModel):
     """
     Resposta que o agente devolve ao BFA (Go).
 

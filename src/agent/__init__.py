@@ -14,5 +14,5 @@
 #     → runner monta o contexto inicial
 #     → graph.agent_graph processa (planner → tools → synthesizer)
 #     → runner empacota a resposta
-#     → BFA recebe AssistantResponse
+#     → BFA recebe AgentResponse
 # =============================================================================

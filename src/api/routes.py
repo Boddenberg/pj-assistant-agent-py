@@ -2,18 +2,18 @@
 Rotas da API — endpoints REST.
 
 Endpoints:
-  POST /v1/assistant  → Endpoint principal (BFA → Agente → Resposta)
+  POST /v1/chat       → Endpoint principal (BFA → Agente → Resposta)
   GET  /healthz       → Health check (liveness probe)
   GET  /readyz        → Readiness check (readiness probe)
 
-Fluxo do endpoint principal (/v1/assistant):
+Fluxo do endpoint principal (/v1/chat):
   ┌──────────────────────────────────────────────────────┐
   │  1. Recebe request do BFA (customer_id, query, ...)  │
   │  2. Valida input (tamanho, injection, PII)           │
   │  3. Executa o agente (LangGraph)                     │
   │  4. Verifica limite de custo                         │
   │  5. Registra métricas (Prometheus)                   │
-  │  6. Retorna AssistantResponse (JSON)                 │
+  │  6. Retorna AgentResponse (JSON)                    │
   └──────────────────────────────────────────────────────┘
 
 Tratamento de erros:
@@ -35,7 +35,7 @@ import time
 from fastapi import APIRouter, HTTPException
 from opentelemetry import trace
 
-from src.core.models import AssistantRequest, AssistantResponse
+from src.core.models import AgentRequest, AgentResponse
 from src.core.exceptions import (
     AgentError,
     InputValidationError,
@@ -69,11 +69,11 @@ tracer = trace.get_tracer("pj-assistant-agent")
 
 
 # =============================================================================
-# POST /v1/assistant — Endpoint principal
+# POST /v1/chat — Endpoint principal
 # =============================================================================
 
-@router.post("/v1/assistant", response_model=AssistantResponse)
-async def assistant(request: AssistantRequest) -> AssistantResponse:
+@router.post("/v1/chat", response_model=AgentResponse)
+async def chat(request: AgentRequest) -> AgentResponse:
     """
     Endpoint principal — recebe contexto do BFA e retorna resposta do agente.
 
@@ -83,7 +83,7 @@ async def assistant(request: AssistantRequest) -> AssistantResponse:
       - profile: dados do perfil (faturamento, segmento, etc.)
       - transactions: lista de transações recentes (opcional)
 
-    Retorna AssistantResponse com:
+    Retorna AgentResponse com:
       - answer: resposta do agente em linguagem natural
       - sources: fontes usadas (knowledge base)
       - reasoning_steps: passos do raciocínio (transparência)
@@ -108,7 +108,7 @@ async def assistant(request: AssistantRequest) -> AssistantResponse:
     )
 
     # Cria um span OpenTelemetry para rastreamento distribuído.
-    with tracer.start_as_current_span("assistant_request") as span:
+    with tracer.start_as_current_span("chat_request") as span:
         span.set_attribute("customer_id", request.customer_id)
 
         try:

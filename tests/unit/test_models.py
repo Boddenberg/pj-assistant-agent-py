@@ -19,8 +19,8 @@ import pytest
 from src.core.models import (
     CustomerProfile,
     Transaction,
-    AssistantRequest,
-    AssistantResponse,
+    AgentRequest,
+    AgentResponse,
     AgentStep,
     StepType,
 )
@@ -60,8 +60,8 @@ class TestTransaction:
         assert t.description == ""
 
 
-class TestAssistantRequest:
-    """Testes do modelo AssistantRequest (entrada do agente)."""
+class TestAgentRequest:
+    """Testes do modelo AgentRequest (entrada do agente)."""
 
     def test_full_request(self, sample_request):
         """Request completa (com profile e transactions) deve funcionar."""
@@ -79,7 +79,7 @@ class TestAssistantRequest:
           - profile = None
           - transactions = lista vazia
         """
-        r = AssistantRequest(query="Quais as taxas do Itaú?")
+        r = AgentRequest(query="Quais as taxas do Itaú?")
 
         assert r.query == "Quais as taxas do Itaú?"
         assert r.customer_id == "anonymous"
@@ -87,12 +87,12 @@ class TestAssistantRequest:
         assert r.transactions == []
 
 
-class TestAssistantResponse:
-    """Testes do modelo AssistantResponse (saída do agente)."""
+class TestAgentResponse:
+    """Testes do modelo AgentResponse (saída do agente)."""
 
     def test_response_has_timestamp(self):
         """Response deve gerar timestamp automaticamente."""
-        r = AssistantResponse(customer_id="x", answer="test")
+        r = AgentResponse(customer_id="x", answer="test")
 
         # Timestamp é gerado por default_factory (datetime.now)
         assert r.timestamp is not None
@@ -107,7 +107,7 @@ class TestAssistantResponse:
             detail="test",
             duration_ms=10.0,
         )
-        r = AssistantResponse(
+        r = AgentResponse(
             customer_id="x",
             answer="ok",
             reasoning=[step],

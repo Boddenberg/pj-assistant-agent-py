@@ -22,7 +22,7 @@ Por que fixtures?
 
 import pytest
 
-from src.core.models import CustomerProfile, Transaction, AssistantRequest
+from src.core.models import CustomerProfile, Transaction, AgentRequest
 
 
 # =============================================================================
@@ -114,7 +114,7 @@ def sample_transactions() -> list[Transaction]:
 # =============================================================================
 
 @pytest.fixture
-def sample_request(sample_profile, sample_transactions) -> AssistantRequest:
+def sample_request(sample_profile, sample_transactions) -> AgentRequest:
     """
     Request completa que simula o que o BFA envia.
 
@@ -122,7 +122,7 @@ def sample_request(sample_profile, sample_transactions) -> AssistantRequest:
     A query é uma pergunta aberta sobre situação financeira
     — exercita o fluxo completo do agente.
     """
-    return AssistantRequest(
+    return AgentRequest(
         customer_id="cust-001",
         profile=sample_profile,
         transactions=sample_transactions,

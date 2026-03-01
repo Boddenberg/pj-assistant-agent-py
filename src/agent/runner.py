@@ -2,13 +2,13 @@
 Runner — fachada para invocar o workflow do agente.
 
 Este módulo é a "porta de entrada" do agente.
-A API (routes.py) chama run_agent() e recebe AssistantResponse.
+A API (routes.py) chama run_agent() e recebe AgentResponse.
 
 Responsabilidades:
   1. Montar o contexto inicial (mensagem com dados do cliente)
   2. Invocar o grafo LangGraph
   3. Extrair resposta e métricas do estado final
-  4. Empacotar tudo em AssistantResponse
+  4. Empacotar tudo em AgentResponse
 
 Por que uma fachada?
   - Desacopla a API do grafo interno
@@ -24,7 +24,7 @@ import time
 
 from langchain_core.messages import HumanMessage
 
-from src.core.models import AssistantRequest, AssistantResponse
+from src.core.models import AgentRequest, AgentResponse
 from src.agent.graph import agent_graph
 from src.agent.prompts import PLANNER_PROMPT
 from src.observability.metrics import estimate_cost
@@ -33,7 +33,7 @@ from src.observability.logging import get_logger
 logger = get_logger("runner")
 
 
-async def run_agent(request: AssistantRequest) -> AssistantResponse:
+async def run_agent(request: AgentRequest) -> AgentResponse:
     """
     Executa o workflow completo do agente para uma requisição do BFA.
 
@@ -43,13 +43,13 @@ async def run_agent(request: AssistantRequest) -> AssistantResponse:
       3. Invoca o grafo (ainvoke = async invoke)
       4. Extrai resposta final da última mensagem
       5. Calcula métricas (tokens, custo)
-      6. Retorna AssistantResponse
+      6. Retorna AgentResponse
 
     Args:
         request: Dados do cliente vindos do BFA (perfil + transações + query).
 
     Returns:
-        AssistantResponse com resposta, reasoning, métricas.
+        AgentResponse com resposta, reasoning, métricas.
     """
 
     # ─── Passo 1: Montar o contexto inicial ────────────────────────
@@ -175,7 +175,7 @@ async def run_agent(request: AssistantRequest) -> AssistantResponse:
     )
 
     # ─── Passo 5: Empacotar resposta ──────────────────────────────
-    return AssistantResponse(
+    return AgentResponse(
         customer_id=request.customer_id,
         answer=answer,
         reasoning=result.get("steps", []),

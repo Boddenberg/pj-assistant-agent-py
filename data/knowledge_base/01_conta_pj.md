@@ -14,13 +14,11 @@ Conta bancária digital para empresas. Permite PIX, pagamento de boletos, cartã
 - **escrow** — conta garantia para custódia de valores.
 
 ## Abertura de Conta PJ — Dados necessários para abrir conta
-Para abrir conta PJ pelo app (context: onboarding), são necessários exatamente 9 campos: CNPJ (cnpj), Razão Social (razaoSocial), Nome Fantasia (nomeFantasia), E-mail (email), Nome do representante (representanteName), CPF do representante (representanteCpf), Telefone (representantePhone), Data de nascimento (representanteBirthDate) e Senha (password) numérica de 6 dígitos. Somente esses 9 campos — nenhum outro documento é exigido, não é necessário contrato social, documentos dos sócios nem comprovante de endereço. Após cadastro o sistema valida CNPJ (não pode já estar cadastrado) e senha (6 dígitos numéricos), conta é criada com agência e número gerados, cliente recebe customerId, agencia e conta, status inicia active. Abertura gratuita, 100% digital. Cada CNPJ só pode ter um cadastro. Login: CPF do representante + senha 6 dígitos; após 5 tentativas erradas conta bloqueada por 30 min.
+Para abrir conta PJ pelo app (context: onboarding), são necessários exatamente 9 campos: CNPJ (cnpj), Razão Social (razaoSocial), Nome Fantasia (nomeFantasia), E-mail (email), Nome do representante (representanteName), CPF do representante (representanteCpf), Telefone (representantePhone), Data de nascimento (representanteBirthDate) e Senha (password) numérica de 6 dígitos. Somente esses 9 campos — nenhum outro documento é exigido, não é necessário contrato social, documentos dos sócios nem comprovante de endereço. Após cadastro a conta é criada com número de agencia e conta. Abertura gratuita, 100% digital. Cada CNPJ só pode ter um cadastro. Login: CPF do representante + senha 6 dígitos;
 
 ## Status da Conta
 
 - **active** — conta funcionando, todas as operações disponíveis.
-- **blocked** — conta temporariamente bloqueada.
-- **closed** — conta encerrada definitivamente.
 
 ## Dados da Conta
 

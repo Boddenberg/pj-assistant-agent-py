@@ -18,7 +18,7 @@ Em produção:
 """
 
 # Versão do prompt — incrementar a cada mudança significativa.
-PROMPT_VERSION = "5.0.0"
+PROMPT_VERSION = "5.1.0"
 
 
 # =============================================================================
@@ -55,6 +55,7 @@ O cliente está em um CHAT — espera respostas como se fosse uma conversa, não
 - NÃO use formato de relatório (Resumo/Análise/Recomendações).
 - Responda como uma mensagem de chat: fluida, natural, objetiva.
 - Se precisar listar algo, use bullet points curtos.
+- Evite repetir a mesma palavra em itens consecutivos. Agrupe dados relacionados num único item (ex: em vez de "Nome do representante, CPF do representante, Telefone do representante", diga "Dados do representante: nome, CPF, telefone...").
 - Mantenha a resposta em no máximo 3-4 parágrafos curtos.
 
 ## Context (strategy do BFA)

@@ -43,9 +43,9 @@ dependencies = [
 
     # --- RAG ---
     # chromadb: vector store local (persistência em disco)
-    # sentence-transformers: modelo de embeddings local (all-MiniLM-L6-v2)
+    # Embeddings via OpenAI API (text-embedding-3-small) — não precisa de
+    # sentence-transformers/torch, economizando ~800MB na imagem Docker.
     "chromadb>=0.5.0",
-    "sentence-transformers>=3.0.0",
 
     # --- Observability ---
     # langfuse: plataforma de monitoramento de LLM (prompts, custos)

@@ -41,12 +41,13 @@ class Settings(BaseSettings):
     # Diretório onde ChromaDB persiste os vetores em disco.
     chroma_persist_dir: str = Field(default="./data/chroma")
 
-    # Modelo de embedding local. all-MiniLM-L6-v2:
-    #   - 384 dimensões (compacto, rápido)
-    #   - Roda em CPU sem GPU
-    #   - Bom o suficiente para português + inglês
-    #   - Em produção: usar text-embedding-3-large da OpenAI
-    embedding_model: str = Field(default="all-MiniLM-L6-v2")
+    # Modelo de embedding. text-embedding-3-small (OpenAI):
+    #   - 1536 dimensões (qualidade superior a modelos locais)
+    #   - Via API: não precisa de torch/sentence-transformers
+    #   - Custo desprezível (~$0.02/milhão de tokens)
+    #   - Suporte nativo a português
+    #   - Elimina ~800MB da imagem Docker
+    embedding_model: str = Field(default="text-embedding-3-small")
 
     # Tamanho de cada chunk em caracteres.
     # 1024 = ~256 tokens → garante que tabelas markdown e seções

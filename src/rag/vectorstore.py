@@ -8,7 +8,7 @@ O que é um vector store?
 
 Stack escolhida:
   - ChromaDB: banco vetorial leve, persistente em disco, zero infra
-  - all-MiniLM-L6-v2: modelo de embedding compacto (384 dimensões)
+  - text-embedding-3-small (OpenAI): modelo de embedding via API
 
 Por que ChromaDB?
   - Perfeito para dev/MVP: pip install e pronto
@@ -16,17 +16,18 @@ Por que ChromaDB?
   - API simples e compatível com LangChain
   - Em produção: migrar para pgvector (PostgreSQL) ou Pinecone
 
-Por que all-MiniLM-L6-v2?
-  - Roda em CPU (sem GPU necessária)
-  - 384 dimensões (leve, rápido)
-  - Suporta português razoavelmente bem
-  - Em produção: usar text-embedding-3-large da OpenAI (3072 dim, melhor qualidade)
+Por que OpenAI Embeddings?
+  - Elimina torch + sentence-transformers (~800MB) da imagem Docker
+  - Qualidade superior ao all-MiniLM-L6-v2 para português
+  - Custo desprezível (~$0.02/milhão de tokens)
+  - Já temos a API key configurada
+  - Resolve build timeout no Railway (imagem final ~500MB vs ~1.5GB)
 """
 
 from __future__ import annotations
 
 from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_openai import OpenAIEmbeddings
 
 from src.core.config import settings
 
@@ -35,20 +36,19 @@ from src.core.config import settings
 _vectorstore: Chroma | None = None
 
 
-def _get_embeddings() -> HuggingFaceEmbeddings:
+def _get_embeddings() -> OpenAIEmbeddings:
     """
-    Cria o modelo de embedding.
+    Cria o modelo de embedding via API da OpenAI.
 
-    HuggingFaceEmbeddings baixa o modelo automaticamente na primeira execução.
-    Depois fica em cache local (~/.cache/huggingface/).
-
-    normalize_embeddings=True: normaliza vetores para unit length.
-    Isso melhora a busca por cosseno (similaridade mais precisa).
+    text-embedding-3-small:
+      - 1536 dimensões (melhor qualidade que MiniLM-L6-v2 com 384)
+      - Custo: ~$0.02 por milhão de tokens (desprezível)
+      - Suporte nativo a português
+      - Não requer torch/sentence-transformers (imagem Docker ~3x menor)
     """
-    return HuggingFaceEmbeddings(
-        model_name=settings.embedding_model,    # all-MiniLM-L6-v2
-        model_kwargs={"device": "cpu"},         # Forçar CPU (sem GPU)
-        encode_kwargs={"normalize_embeddings": True},
+    return OpenAIEmbeddings(
+        model=settings.embedding_model,
+        openai_api_key=settings.openai_api_key,
     )
 
 

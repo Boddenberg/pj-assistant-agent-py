@@ -21,7 +21,7 @@ startCommand = "bash start.sh"
 # Healthcheck — Railway verifica se o serviço está saudável
 # O endpoint /healthz retorna 200 quando a app está pronta
 healthcheckPath = "/healthz"
-healthcheckTimeout = 120
+healthcheckTimeout = 300
 
 # Reinicia automaticamente em caso de falha
 restartPolicyType = "ON_FAILURE"

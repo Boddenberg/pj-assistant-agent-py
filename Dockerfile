@@ -52,19 +52,27 @@ WORKDIR $APP_DIR
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
+# Pré-baixar modelo de embedding no build (evita download no startup)
+# Sem isso, o primeiro startup no Railway baixa ~90MB do HuggingFace,
+# podendo estourar o timeout do health check (120s).
+# O cache fica em /home/appuser/.cache/huggingface/ acessível pelo appuser.
+ENV HF_HOME=/home/$APP_USER/.cache/huggingface
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
 # Copiar código do projeto
 COPY . .
 
 # Permissões
 RUN chmod +x start.sh && \
     mkdir -p data/chroma && \
-    chown -R $APP_USER:$APP_USER $APP_DIR
+    chown -R $APP_USER:$APP_USER $APP_DIR && \
+    chown -R $APP_USER:$APP_USER /home/$APP_USER
 
 USER $APP_USER
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:${PORT:-8000}/healthz')" || exit 1
 
 CMD ["bash", "start.sh"]

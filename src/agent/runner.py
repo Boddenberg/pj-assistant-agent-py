@@ -23,7 +23,7 @@ import json
 import re
 import time
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from src.core.models import AgentRequest, AgentResponse
 from src.agent.graph import agent_graph
@@ -87,8 +87,22 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
     )
 
     # ─── Passo 2: Criar estado inicial do grafo ────────────────────
+    # Montar mensagens: histórico de conversa + query atual.
+    # O BFA envia até 5 turnos anteriores (history).
+    # Cada turno vira HumanMessage + AIMessage no LangGraph,
+    # dando ao LLM o contexto da conversa para não repetir perguntas.
+    messages: list[HumanMessage | AIMessage] = []
+
+    if request.history:
+        for turn in request.history:
+            messages.append(HumanMessage(content=turn.query))
+            messages.append(AIMessage(content=turn.answer))
+
+    # Query atual do cliente (com contexto do planner)
+    messages.append(HumanMessage(content=context))
+
     initial_state = {
-        "messages": [HumanMessage(content=context)],
+        "messages": messages,
         "steps": [],
         "sources": [],
         "customer_id": request.customer_id,
@@ -100,6 +114,7 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
         "🚀 [RUNNER 2/4] GRAPH_INVOKING — Invocando grafo LangGraph",
         customer_id=request.customer_id,
         initial_messages_count=len(initial_state["messages"]),
+        history_turns=len(request.history),
     )
 
     # ── Log completo do INPUT do LangGraph ─────────────────────────
@@ -158,13 +173,39 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
     final_message = result["messages"][-1]
     raw_answer = final_message.content if hasattr(final_message, "content") else str(final_message)
 
-    # Extrair context da resposta do LLM.
-    # O LLM inclui [CONTEXT:xxx] na última linha — o BFA usa esse valor
-    # no strategy pattern para decidir qual fluxo executar no lado Go.
-    # Regex captura o valor e remove a tag da resposta visível ao cliente.
-    context_match = re.search(r"\[CONTEXT:(\w+)\]", raw_answer)
-    context = context_match.group(1) if context_match else None
-    answer = re.sub(r"\s*\[CONTEXT:\w+\]\s*", "", raw_answer).strip()
+    # Extrair metadados estruturados da resposta do LLM.
+    # O LLM inclui [META:{json}] na última linha — contém context, intent,
+    # confidence e suggested_actions para o BFA tomar decisões.
+    # Regex captura o JSON e remove a tag da resposta visível ao cliente.
+    meta_match = re.search(r"\[META:(\{.*?\})\]", raw_answer, re.DOTALL)
+    context = None
+    intent = None
+    confidence = 1.0
+    suggested_actions: list[str] = []
+
+    if meta_match:
+        try:
+            meta = json.loads(meta_match.group(1))
+            context = meta.get("context")
+            intent = meta.get("intent")
+            confidence = float(meta.get("confidence", 1.0))
+            suggested_actions = meta.get("suggested_actions", [])
+        except (json.JSONDecodeError, ValueError):
+            logger.warning(
+                "⚠️ [RUNNER] META_PARSE_FAILED — não foi possível parsear [META:...]",
+                customer_id=request.customer_id,
+                raw_meta=meta_match.group(1),
+            )
+
+    # Fallback: tentar formato antigo [CONTEXT:xxx] para compatibilidade
+    if not context and not meta_match:
+        context_match = re.search(r"\[CONTEXT:(\w+)\]", raw_answer)
+        if context_match:
+            context = context_match.group(1)
+
+    # Limpar tags META/CONTEXT da resposta visível ao cliente
+    answer = re.sub(r"\s*\[META:\{.*?\}\]\s*", "", raw_answer, flags=re.DOTALL).strip()
+    answer = re.sub(r"\s*\[CONTEXT:\w+\]\s*", "", answer).strip()
 
     tokens_in = result.get("tokens_in", 0)
     tokens_out = result.get("tokens_out", 0)
@@ -176,6 +217,9 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
         customer_id=request.customer_id,
         answer_length=len(answer),
         context=context,
+        intent=intent,
+        confidence=confidence,
+        suggested_actions=suggested_actions,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         total_tokens=total_tokens,
@@ -185,12 +229,18 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
     )
 
     # ─── Passo 5: Empacotar resposta ──────────────────────────────
+    from src.core.models import AgentMetadata
     return AgentResponse(
         customer_id=request.customer_id,
         answer=answer,
         context=context,
-        reasoning=result.get("steps", []),
-        sources=result.get("sources", []),
-        tokens_used=total_tokens,
-        estimated_cost_usd=cost,
+        intent=intent,
+        confidence=confidence,
+        suggested_actions=suggested_actions,
+        metadata=AgentMetadata(
+            reasoning=result.get("steps", []),
+            sources=result.get("sources", []),
+            tokens_used=total_tokens,
+            estimated_cost_usd=cost,
+        ),
     )

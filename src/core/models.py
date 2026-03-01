@@ -89,20 +89,41 @@ class AgentStep(BaseModel):
 # Contratos de Entrada/Saída — interface com o BFA
 # =============================================================================
 
+class ChatMessage(BaseModel):
+    """
+    Mensagem do histórico de conversa — enviada pelo BFA.
+
+    O BFA mantém as últimas 5 interações do cliente na sessão
+    e envia neste formato para dar continuidade à conversa.
+    Cada par query/answer representa um turno completo.
+    """
+    query: str                                          # Pergunta do cliente naquele turno
+    answer: str                                         # Resposta do agente naquele turno
+
+
 class AgentRequest(BaseModel):
     """
     Payload de entrada do agente.
 
-    Aceita dois formatos:
+    Aceita vários formatos:
 
       Mínimo (só query):
         { "query": "Como abrir uma conta PJ?" }
+
+      Com histórico (BFA envia últimos 5 turnos):
+        {
+          "query": "E quais documentos preciso?",
+          "history": [
+            { "query": "Quero abrir conta", "answer": "Para abrir..." }
+          ]
+        }
 
       Completo (BFA envia tudo):
         {
           "customer_id": "cust-001",
           "profile": { ... },
           "transactions": [ ... ],
+          "history": [ ... ],
           "query": "Qual minha situação financeira?"
         }
 
@@ -115,36 +136,47 @@ class AgentRequest(BaseModel):
     transactions: list[Transaction] = Field(             # Transações (opcional)
         default_factory=list,
     )
+    history: list[ChatMessage] = Field(                  # Histórico de conversa (até 5 turnos)
+        default_factory=list,
+    )
+
+
+class AgentMetadata(BaseModel):
+    """
+    Metadados de observabilidade — NÃO usados para decisão do BFA.
+
+    Servem para monitoramento, debug e auditoria.
+    O BFA pode logar/encaminhar para dashboards, mas não usa para routing.
+    """
+    reasoning: list[AgentStep] = Field(default_factory=list)   # Passos executados
+    sources: list[str] = Field(default_factory=list)           # Fontes RAG consultadas
+    tokens_used: int = 0                                       # Total tokens consumidos
+    estimated_cost_usd: float = 0.0                            # Custo estimado USD
 
 
 class AgentResponse(BaseModel):
     """
     Resposta que o agente devolve ao BFA (Go).
 
-    Contém a resposta textual + metadados de observabilidade.
-    O BFA repassa ao front, que renderiza para o cliente.
+    Campos de DECISÃO (o BFA usa para routing/strategy):
+      - context     → strategy pattern: qual fluxo executar (onboarding, etc.)
+      - intent      → intenção classificada do cliente (open_account, check_balance, etc.)
+      - confidence  → confiança da resposta (0.0-1.0). Abaixo de 0.5 = escalar para humano
+      - suggested_actions → sugestões para o front renderizar como opções ao cliente
 
-    O campo `context` é usado pelo BFA para strategy pattern:
-      - O BFA recebe o context (ex: "onboarding", "credit_analysis")
-      - Usa strategy para decidir qual ação executar no lado Go
-      - O agente NÃO chama endpoints — apenas retorna o context
+    Campos de APRESENTAÇÃO (BFA repassa ao front):
+      - answer      → texto para exibir ao cliente no chat
 
-    Campos de observabilidade (tokens_used, estimated_cost_usd):
-      - Permitem ao BFA monitorar custos
-      - O front pode exibir "powered by AI" com métricas
-      - Dashboards de custo por cliente/segmento
+    Campos de OBSERVABILIDADE (dashboards, auditoria):
+      - metadata    → tokens, custo, reasoning, sources
     """
-    customer_id: str                                    # ID do cliente
-    answer: str                                         # Resposta textual do agente
-    context: str | None = None                          # Context para strategy no BFA (ex: "onboarding")
-    reasoning: list[AgentStep] = Field(                 # Passos executados (justificativa)
-        default_factory=list,
-    )
-    sources: list[str] = Field(                         # Fontes RAG utilizadas
-        default_factory=list,
-    )
-    tokens_used: int = 0                                # Total de tokens consumidos
-    estimated_cost_usd: float = 0.0                     # Custo estimado em USD
-    timestamp: str = Field(                             # Timestamp da resposta
+    customer_id: str                                           # ID do cliente
+    answer: str                                                # Resposta textual para o cliente
+    context: str | None = None                                 # Strategy pattern do BFA
+    intent: str | None = None                                  # Intenção classificada
+    confidence: float = 1.0                                    # Confiança (0.0-1.0)
+    suggested_actions: list[str] = Field(default_factory=list)  # Sugestões para o front
+    metadata: AgentMetadata = Field(default_factory=AgentMetadata)  # Observabilidade
+    timestamp: str = Field(
         default_factory=lambda: datetime.utcnow().isoformat(),
     )

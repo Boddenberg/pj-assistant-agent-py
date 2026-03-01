@@ -19,8 +19,10 @@ import pytest
 from src.core.models import (
     CustomerProfile,
     Transaction,
+    ChatMessage,
     AgentRequest,
     AgentResponse,
+    AgentMetadata,
     AgentStep,
     StepType,
 )
@@ -85,6 +87,33 @@ class TestAgentRequest:
         assert r.customer_id == "anonymous"
         assert r.profile is None
         assert r.transactions == []
+        assert r.history == []
+
+    def test_request_with_history(self):
+        """
+        Request com histórico de conversa deve preservar turnos.
+
+        Cenário: o BFA envia os últimos turnos da conversa para que
+        o agente tenha contexto e não repita perguntas.
+        """
+        history = [
+            ChatMessage(
+                query="Quero abrir uma conta",
+                answer="Para abrir sua conta PJ você precisa do CNPJ...",
+            ),
+            ChatMessage(
+                query="Quais documentos preciso?",
+                answer="Você vai precisar do contrato social...",
+            ),
+        ]
+        r = AgentRequest(
+            query="Já tenho tudo, como prossigo?",
+            history=history,
+        )
+
+        assert len(r.history) == 2
+        assert r.history[0].query == "Quero abrir uma conta"
+        assert r.history[1].answer == "Você vai precisar do contrato social..."
 
 
 class TestAgentResponse:
@@ -97,11 +126,16 @@ class TestAgentResponse:
         # Timestamp é gerado por default_factory (datetime.now)
         assert r.timestamp is not None
 
-        # Tokens default = 0 (ainda não processou nada)
-        assert r.tokens_used == 0
+        # Tokens default = 0 (dentro do metadata)
+        assert r.metadata.tokens_used == 0
 
         # Context default = None (sem ação no BFA)
         assert r.context is None
+
+        # Novos campos de decisão — defaults
+        assert r.intent is None
+        assert r.confidence == 1.0
+        assert r.suggested_actions == []
 
     def test_response_with_context(self):
         """Response com context deve propagar para o BFA usar no strategy pattern."""
@@ -109,13 +143,20 @@ class TestAgentResponse:
             customer_id="x",
             answer="Vou te ajudar a abrir sua conta!",
             context="onboarding",
+            intent="open_account",
+            confidence=0.95,
+            suggested_actions=["Abrir conta agora", "Ver tipos de conta"],
         )
 
         # Context deve ser exatamente o valor informado
         assert r.context == "onboarding"
+        # Campos de decisão do BFA
+        assert r.intent == "open_account"
+        assert r.confidence == 0.95
+        assert len(r.suggested_actions) == 2
 
     def test_response_with_steps(self):
-        """Response com reasoning steps deve preservar a sequência."""
+        """Response com reasoning steps deve preservar a sequência no metadata."""
         step = AgentStep(
             step=StepType.PLAN,
             detail="test",
@@ -124,9 +165,16 @@ class TestAgentResponse:
         r = AgentResponse(
             customer_id="x",
             answer="ok",
-            reasoning=[step],
+            metadata=AgentMetadata(
+                reasoning=[step],
+                sources=["kb: abertura_conta"],
+                tokens_used=150,
+                estimated_cost_usd=0.0001,
+            ),
         )
 
-        # Deve ter exatamente 1 step do tipo PLAN
-        assert len(r.reasoning) == 1
-        assert r.reasoning[0].step == StepType.PLAN
+        # Steps ficam dentro do metadata (observabilidade)
+        assert len(r.metadata.reasoning) == 1
+        assert r.metadata.reasoning[0].step == StepType.PLAN
+        assert r.metadata.sources == ["kb: abertura_conta"]
+        assert r.metadata.tokens_used == 150

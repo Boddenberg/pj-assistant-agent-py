@@ -99,12 +99,12 @@ async def chat(request: AgentRequest) -> AgentResponse:
     logger.info(
         "📥 [1/6] REQUEST_RECEIVED — Nova requisição recebida",
         customer_id=request.customer_id,
-        company_name=request.profile.company_name,
+        company_name=request.profile.company_name if request.profile else "N/A",
         query=request.query[:100] + ("..." if len(request.query) > 100 else ""),
         query_length=len(request.query),
         num_transactions=len(request.transactions),
-        segment=request.profile.segment,
-        credit_score=request.profile.credit_score,
+        segment=request.profile.segment if request.profile else "N/A",
+        credit_score=request.profile.credit_score if request.profile else 0,
     )
 
     # Cria um span OpenTelemetry para rastreamento distribuído.

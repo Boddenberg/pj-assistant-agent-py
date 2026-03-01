@@ -18,7 +18,7 @@ Em produção:
 """
 
 # Versão do prompt — incrementar a cada mudança significativa.
-PROMPT_VERSION = "4.0.0"
+PROMPT_VERSION = "5.0.0"
 
 
 # =============================================================================
@@ -73,7 +73,7 @@ Para indicar o context, inclua na ÚLTIMA LINHA da sua resposta (o runner vai ex
 - `search_knowledge_base`: Busca na base de conhecimento (políticas, FAQ, produtos).
 - `assess_credit_profile`: Avalia perfil de crédito e nível de risco.
 
-Use as tools quando precisar de dados. Não chame tools desnecessárias."""
+REGRA OBRIGATÓRIA: SEMPRE chame `search_knowledge_base` antes de responder qualquer pergunta sobre conta, abertura, requisitos, documentos, produtos, serviços, PIX, boletos, cartão, limites, segurança ou qualquer tema bancário. Só responda direto (sem tools) para saudações simples como "oi", "olá", "tudo bem?" ou agradecimentos."""
 
 
 # =============================================================================
@@ -88,5 +88,5 @@ Contexto:
 - Tem transações: {has_transactions}
 - Pergunta: {query}
 
-Decida quais tools chamar (se necessário). Seja eficiente — não chame tools desnecessárias.
-Se a pergunta for simples (saudação, dúvida geral), responda direto sem tools."""
+Decida quais tools chamar. SEMPRE use `search_knowledge_base` para qualquer pergunta sobre conta, abertura, produtos, serviços ou operações bancárias.
+Só responda direto sem tools se for saudação simples ("oi", "olá") ou agradecimento."""

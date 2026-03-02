@@ -168,7 +168,8 @@ FIELD_FORMAT_HINTS: dict[OnboardingField, str] = {
 @dataclass
 class OnboardingState:
     """Estado do onboarding derivado do histórico."""
-    current_field: OnboardingField
+    current_field: OnboardingField      # campo que o cliente ACABOU de responder (BFA valida)
+    next_field: OnboardingField         # campo que o LLM deve PEDIR agora
     collected: dict[str, str] = field(default_factory=dict)
     is_complete: bool = False
     has_validation_error: bool = False
@@ -184,7 +185,13 @@ def determine_current_field(
     """
     Analisa o histórico para determinar em qual campo estamos.
 
+    Conceitos-chave:
+      - current_field: campo que o cliente acabou de responder (BFA valida esse)
+      - next_field: campo que o LLM deve PEDIR ao cliente agora
+      - field_value: valor cru da query atual (BFA valida)
+
     Lógica:
+      - history vazio: primeira mensagem → welcome (next_field = CNPJ)
       - Turno 0 no histórico: cliente pediu abertura → agente deu welcome
       - A partir do turno 1: cada turno = cliente respondeu um campo
       - Se validation_error != "": o BFA rejeitou o último campo → repetir
@@ -196,7 +203,7 @@ def determine_current_field(
         validation_error: Erro do BFA se o último campo foi rejeitado
 
     Returns:
-        OnboardingState com campo atual, valor e dados coletados.
+        OnboardingState com campo atual, próximo campo, valor e dados coletados.
     """
     collected: dict[str, str] = {}
 
@@ -204,6 +211,7 @@ def determine_current_field(
         # Primeira mensagem — welcome + pedir CNPJ
         return OnboardingState(
             current_field=OnboardingField.WELCOME,
+            next_field=OnboardingField.WELCOME,
             field_value=current_query,
         )
 
@@ -214,7 +222,7 @@ def determine_current_field(
     # ...
     data_turns = len(history) - 1  # descontar turno 0 (abertura)
 
-    # Coletar dados dos turnos anteriores
+    # Coletar dados dos turnos anteriores (não inclui a query atual)
     for i in range(data_turns):
         if i < len(DATA_FIELDS):
             field_enum = DATA_FIELDS[i]
@@ -229,31 +237,40 @@ def determine_current_field(
             collected.pop(rejected_field.value, None)
             return OnboardingState(
                 current_field=rejected_field,
+                next_field=rejected_field,  # pedir o MESMO campo de novo
                 collected=collected,
                 has_validation_error=True,
                 validation_error=validation_error,
                 field_value=current_query,
             )
 
-    # Determinar próximo campo
-    if data_turns >= len(DATA_FIELDS):
-        # Todos os campos já foram coletados — só falta processar o último
-        # A query atual é a resposta do último campo
-        last_field = DATA_FIELDS[-1]
-        collected[last_field.value] = current_query
+    # O campo que o cliente está respondendo AGORA com current_query
+    if data_turns < len(DATA_FIELDS):
+        answering_field = DATA_FIELDS[data_turns]
+    else:
+        answering_field = DATA_FIELDS[-1]
+
+    # Incluir a resposta atual nos coletados
+    collected[answering_field.value] = current_query
+
+    # Determinar o PRÓXIMO campo a pedir
+    next_index = data_turns + 1
+    if next_index >= len(DATA_FIELDS):
+        # Todos os campos coletados → completo
         return OnboardingState(
-            current_field=OnboardingField.COMPLETED,
+            current_field=answering_field,
+            next_field=OnboardingField.COMPLETED,
             collected=collected,
             is_complete=True,
             field_value=current_query,
         )
 
-    # O campo atual é o que estamos esperando
-    current_field = DATA_FIELDS[data_turns]
+    next_field = DATA_FIELDS[next_index]
 
     logger.info(
         "📋 [ONBOARDING] State determined",
-        current_field=current_field.value,
+        answering_field=answering_field.value,
+        next_field=next_field.value,
         collected_count=len(collected),
         collected_fields=list(collected.keys()),
         history_turns=len(history),
@@ -261,7 +278,8 @@ def determine_current_field(
     )
 
     return OnboardingState(
-        current_field=current_field,
+        current_field=answering_field,
+        next_field=next_field,
         collected=collected,
         field_value=current_query,
     )
@@ -297,8 +315,8 @@ def build_onboarding_context(state: OnboardingState) -> str:
         return "\n".join(lines)
 
     if state.has_validation_error:
-        label = FIELD_LABELS.get(state.current_field, state.current_field.value)
-        hint = FIELD_FORMAT_HINTS.get(state.current_field, "")
+        label = FIELD_LABELS.get(state.next_field, state.next_field.value)
+        hint = FIELD_FORMAT_HINTS.get(state.next_field, "")
         lines.append(f"\n### ⚠️ Dado rejeitado: {label}")
         lines.append(f"Erro: {state.validation_error}")
         if hint:
@@ -307,9 +325,9 @@ def build_onboarding_context(state: OnboardingState) -> str:
         lines.append(f"   Peça SOMENTE o campo: {label}")
         return "\n".join(lines)
 
-    # Campo normal — pedir ao cliente
-    prompt_text = FIELD_PROMPTS.get(state.current_field, "")
-    label = FIELD_LABELS.get(state.current_field, state.current_field.value)
+    # Campo normal — pedir ao cliente o PRÓXIMO campo
+    prompt_text = FIELD_PROMPTS.get(state.next_field, "")
+    label = FIELD_LABELS.get(state.next_field, state.next_field.value)
     lines.append(f"\n### Próximo campo: {label}")
     lines.append(f"\nResponda ao cliente com esta mensagem (pode humanizar levemente):")
     lines.append(f'"{prompt_text}"')

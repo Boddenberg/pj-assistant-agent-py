@@ -130,81 +130,94 @@ class TestDetermineCurrentField:
         assert not state.has_validation_error
 
     def test_after_welcome_asks_cnpj(self):
-        """Após turno 0 (welcome), o próximo campo é CNPJ."""
+        """Após turno 0 (welcome), cliente responde CNPJ, next é Razão Social."""
         history = _make_history(0)  # só turno 0 (abertura)
         state = determine_current_field(history, "12.345.678/0001-99")
         assert state.current_field == OnboardingField.CNPJ
+        assert state.next_field == OnboardingField.RAZAO_SOCIAL
         assert state.field_value == "12.345.678/0001-99"
 
     def test_after_cnpj_asks_razao_social(self):
-        """Após 1 campo respondido (CNPJ), pede Razão Social."""
+        """Após 1 campo respondido (CNPJ), cliente responde Razão Social, next é Nome Fantasia."""
         history = _make_history(1)
         state = determine_current_field(history, "Empresa Teste LTDA")
         assert state.current_field == OnboardingField.RAZAO_SOCIAL
+        assert state.next_field == OnboardingField.NOME_FANTASIA
 
     def test_after_razao_social_asks_nome_fantasia(self):
-        """Após 2 campos, pede Nome Fantasia."""
+        """Após 2 campos, cliente responde Nome Fantasia, next é Email."""
         history = _make_history(2)
         state = determine_current_field(history, "Empresa Teste")
         assert state.current_field == OnboardingField.NOME_FANTASIA
+        assert state.next_field == OnboardingField.EMAIL
 
     def test_after_nome_fantasia_asks_email(self):
-        """Após 3 campos, pede E-mail."""
+        """Após 3 campos, cliente responde Email, next é Representante Name."""
         history = _make_history(3)
         state = determine_current_field(history, "contato@empresa.com")
         assert state.current_field == OnboardingField.EMAIL
+        assert state.next_field == OnboardingField.REPRESENTANTE_NAME
 
     def test_after_email_asks_representante_name(self):
-        """Após 4 campos, pede nome do representante."""
+        """Após 4 campos, cliente responde nome representante, next é CPF."""
         history = _make_history(4)
         state = determine_current_field(history, "João da Silva Santos")
         assert state.current_field == OnboardingField.REPRESENTANTE_NAME
+        assert state.next_field == OnboardingField.REPRESENTANTE_CPF
 
     def test_after_name_asks_cpf(self):
-        """Após 5 campos, pede CPF do representante."""
+        """Após 5 campos, cliente responde CPF, next é Telefone."""
         history = _make_history(5)
         state = determine_current_field(history, "123.456.789-00")
         assert state.current_field == OnboardingField.REPRESENTANTE_CPF
+        assert state.next_field == OnboardingField.REPRESENTANTE_PHONE
 
     def test_after_cpf_asks_phone(self):
-        """Após 6 campos, pede telefone."""
+        """Após 6 campos, cliente responde telefone, next é data nascimento."""
         history = _make_history(6)
         state = determine_current_field(history, "(11) 99999-8888")
         assert state.current_field == OnboardingField.REPRESENTANTE_PHONE
+        assert state.next_field == OnboardingField.REPRESENTANTE_BIRTH_DATE
 
     def test_after_phone_asks_birth_date(self):
-        """Após 7 campos, pede data de nascimento."""
+        """Após 7 campos, cliente responde data nascimento, next é password."""
         history = _make_history(7)
         state = determine_current_field(history, "15/03/1990")
         assert state.current_field == OnboardingField.REPRESENTANTE_BIRTH_DATE
+        assert state.next_field == OnboardingField.PASSWORD
 
     def test_after_birth_date_asks_password(self):
-        """Após 8 campos, pede senha."""
+        """Após 8 campos, cliente responde senha, next é confirmação."""
         history = _make_history(8)
         state = determine_current_field(history, "123456")
         assert state.current_field == OnboardingField.PASSWORD
+        assert state.next_field == OnboardingField.PASSWORD_CONFIRMATION
 
     def test_after_password_asks_confirmation(self):
-        """Após 9 campos, pede confirmação de senha."""
+        """Após 9 campos, cliente responde confirmação, next é COMPLETED."""
         history = _make_history(9)
         state = determine_current_field(history, "123456")
         assert state.current_field == OnboardingField.PASSWORD_CONFIRMATION
+        assert state.next_field == OnboardingField.COMPLETED
 
     def test_all_fields_done_returns_completed(self):
-        """Após 10 campos respondidos → COMPLETED."""
+        """Após 10 campos respondidos → is_complete=True, next=COMPLETED."""
         history = _make_history(10)
         state = determine_current_field(history, "pronto")
-        assert state.current_field == OnboardingField.COMPLETED
+        assert state.next_field == OnboardingField.COMPLETED
         assert state.is_complete is True
 
     def test_collected_tracks_previous_fields(self):
-        """Campos coletados devem estar no dict 'collected'."""
+        """Campos coletados devem incluir o campo atual + anteriores."""
         history = _make_history(3)
         state = determine_current_field(history, "contato@empresa.com")
+        # Campos do history + campo atual (email)
         assert OnboardingField.CNPJ.value in state.collected
         assert OnboardingField.RAZAO_SOCIAL.value in state.collected
         assert OnboardingField.NOME_FANTASIA.value in state.collected
+        assert OnboardingField.EMAIL.value in state.collected
         assert state.collected[OnboardingField.CNPJ.value] == "12.345.678/0001-99"
+        assert state.collected[OnboardingField.EMAIL.value] == "contato@empresa.com"
 
     def test_field_value_captures_current_query(self):
         """field_value deve ser a query atual (valor cru do campo)."""
@@ -273,6 +286,7 @@ class TestDetermineCurrentFieldValidationError:
         history = _make_history(1)  # CNPJ respondido
         state = determine_current_field(history, "Empresa LTDA")
         assert state.current_field == OnboardingField.RAZAO_SOCIAL
+        assert state.next_field == OnboardingField.NOME_FANTASIA
         assert state.has_validation_error is False
 
 
@@ -287,6 +301,7 @@ class TestBuildOnboardingContext:
         """Welcome: gera instrução com prompt de boas-vindas."""
         state = OnboardingState(
             current_field=OnboardingField.WELCOME,
+            next_field=OnboardingField.WELCOME,
             field_value="Quero abrir conta",
         )
         ctx = build_onboarding_context(state)
@@ -295,20 +310,25 @@ class TestBuildOnboardingContext:
         assert "search_knowledge_base" in ctx  # instrução de NÃO chamar
 
     def test_normal_field_context(self):
-        """Campo normal: gera instrução pedindo somente aquele campo."""
+        """Campo normal: LLM recebe instrução para pedir o PRÓXIMO campo."""
         state = OnboardingState(
             current_field=OnboardingField.RAZAO_SOCIAL,
-            collected={OnboardingField.CNPJ.value: "12.345.678/0001-99"},
+            next_field=OnboardingField.NOME_FANTASIA,
+            collected={
+                OnboardingField.CNPJ.value: "12.345.678/0001-99",
+                OnboardingField.RAZAO_SOCIAL.value: "Empresa Teste LTDA",
+            },
             field_value="Empresa Teste LTDA",
         )
         ctx = build_onboarding_context(state)
-        assert "Razão Social" in ctx
+        assert "Nome Fantasia" in ctx  # LLM deve pedir o PRÓXIMO campo
         assert "SOMENTE" in ctx
 
     def test_validation_error_context(self):
         """Erro de validação: gera instrução com erro e dica de formato."""
         state = OnboardingState(
             current_field=OnboardingField.CNPJ,
+            next_field=OnboardingField.CNPJ,  # re-ask same field
             has_validation_error=True,
             validation_error="CNPJ deve ter 14 dígitos",
             field_value="123",
@@ -333,7 +353,8 @@ class TestBuildOnboardingContext:
             OnboardingField.PASSWORD_CONFIRMATION.value: "123456",
         }
         state = OnboardingState(
-            current_field=OnboardingField.COMPLETED,
+            current_field=OnboardingField.PASSWORD_CONFIRMATION,
+            next_field=OnboardingField.COMPLETED,
             collected=collected,
             is_complete=True,
         )
@@ -347,7 +368,8 @@ class TestBuildOnboardingContext:
         """No resumo final, PASSWORD e PASSWORD_CONFIRMATION não aparecem."""
         collected = {f.value: f"valor_{f.value}" for f in DATA_FIELDS}
         state = OnboardingState(
-            current_field=OnboardingField.COMPLETED,
+            current_field=OnboardingField.PASSWORD_CONFIRMATION,
+            next_field=OnboardingField.COMPLETED,
             collected=collected,
             is_complete=True,
         )
@@ -361,9 +383,15 @@ class TestBuildOnboardingContext:
 
     def test_context_always_has_no_search_instruction(self):
         """Toda instrução deve dizer para NÃO chamar search_knowledge_base."""
-        for field in [OnboardingField.WELCOME, OnboardingField.CNPJ, OnboardingField.EMAIL]:
+        pairs = [
+            (OnboardingField.WELCOME, OnboardingField.WELCOME),
+            (OnboardingField.CNPJ, OnboardingField.RAZAO_SOCIAL),
+            (OnboardingField.EMAIL, OnboardingField.REPRESENTANTE_NAME),
+        ]
+        for current, nxt in pairs:
             state = OnboardingState(
-                current_field=field,
+                current_field=current,
+                next_field=nxt,
                 field_value="qualquer",
             )
             ctx = build_onboarding_context(state)
@@ -433,7 +461,10 @@ class TestOnboardingState:
 
     def test_defaults(self):
         """Defaults devem ser seguros."""
-        state = OnboardingState(current_field=OnboardingField.CNPJ)
+        state = OnboardingState(
+            current_field=OnboardingField.CNPJ,
+            next_field=OnboardingField.RAZAO_SOCIAL,
+        )
         assert state.collected == {}
         assert state.is_complete is False
         assert state.has_validation_error is False
@@ -444,6 +475,7 @@ class TestOnboardingState:
         """Deve aceitar todos os campos."""
         state = OnboardingState(
             current_field=OnboardingField.EMAIL,
+            next_field=OnboardingField.EMAIL,  # re-ask on error
             collected={"cnpj": "12345678000199"},
             is_complete=False,
             has_validation_error=True,
@@ -451,6 +483,7 @@ class TestOnboardingState:
             field_value="invalido",
         )
         assert state.current_field == OnboardingField.EMAIL
+        assert state.next_field == OnboardingField.EMAIL
         assert state.has_validation_error is True
         assert state.validation_error == "Email inválido"
 
@@ -480,23 +513,32 @@ class TestFieldSequenceIntegration:
         # 1. Welcome
         state = determine_current_field([], "Quero abrir conta")
         assert state.current_field == OnboardingField.WELCOME
+        assert state.next_field == OnboardingField.WELCOME
 
         history = [{"query": "Quero abrir conta", "answer": "Vamos lá!"}]
 
         # 2-11. Um campo por vez
         for i, value in enumerate(field_values):
             state = determine_current_field(history, value)
-            expected_field = DATA_FIELDS[i]
-            assert state.current_field == expected_field, (
-                f"Turn {i + 1}: expected {expected_field.value}, "
+            expected_current = DATA_FIELDS[i]
+            assert state.current_field == expected_current, (
+                f"Turn {i + 1}: expected current={expected_current.value}, "
                 f"got {state.current_field.value}"
+            )
+            # next_field should be the NEXT data field, or COMPLETED if last
+            if i + 1 < len(DATA_FIELDS):
+                expected_next = DATA_FIELDS[i + 1]
+            else:
+                expected_next = OnboardingField.COMPLETED
+            assert state.next_field == expected_next, (
+                f"Turn {i + 1}: expected next={expected_next.value}, "
+                f"got {state.next_field.value}"
             )
             assert state.field_value == value
             history.append({"query": value, "answer": f"Recebido {i + 1}!"})
 
-        # 12. Completed
-        state = determine_current_field(history, "pronto")
-        assert state.current_field == OnboardingField.COMPLETED
+        # After the last field (passwordConfirmation), is_complete should be True
+        # on the last iteration above (i=9)
         assert state.is_complete is True
         assert len(state.collected) == 10
 
@@ -524,6 +566,7 @@ class TestFieldSequenceIntegration:
         history = _make_history(10)
         state = determine_current_field(history, "finalizar")
         assert state.is_complete is True
+        assert state.next_field == OnboardingField.COMPLETED
         # Os 10 campos devem estar nos coletados
         for field in DATA_FIELDS:
             assert field.value in state.collected, (

@@ -28,6 +28,11 @@ from langchain_core.messages import AIMessage, HumanMessage
 from src.core.models import AgentRequest, AgentResponse
 from src.agent.graph import agent_graph
 from src.agent.prompts import PLANNER_PROMPT
+from src.agent.onboarding import (
+    OnboardingStateMachine,
+    build_onboarding_context,
+    is_onboarding_intent,
+)
 from src.observability.metrics import estimate_cost
 from src.observability.logging import get_logger
 
@@ -74,6 +79,31 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
 
     if request.profile:
         context += f"\n\nPerfil do cliente (JSON):\n{profile_json}"
+
+    # ─── Onboarding: validação determinística ──────────────────────
+    # Se a conversa é sobre abertura de conta, injeta instruções
+    # geradas por código (etapa atual, dados validados, erros).
+    # O LLM recebe o que fazer — não precisa inferir sozinho.
+    history_dicts = [
+        {"query": turn.query, "answer": turn.answer}
+        for turn in request.history
+    ]
+
+    if is_onboarding_intent(request.query, history_dicts):
+        sm = OnboardingStateMachine()
+        onboarding_state = sm.process(history_dicts, request.query)
+        onboarding_ctx = build_onboarding_context(onboarding_state)
+        context += onboarding_ctx
+
+        logger.info(
+            "📋 [RUNNER] ONBOARDING_CONTEXT_INJECTED",
+            customer_id=request.customer_id,
+            onboarding_step=onboarding_state.current_step,
+            collected_fields=list(onboarding_state.collected.keys()),
+            errors=onboarding_state.errors,
+            pending_fields=onboarding_state.pending_fields,
+            is_complete=onboarding_state.is_complete,
+        )
 
     context_duration = (time.perf_counter() - context_start) * 1000
 

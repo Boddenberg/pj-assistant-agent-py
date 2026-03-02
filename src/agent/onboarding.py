@@ -1,33 +1,38 @@
 """
 Onboarding — fluxo conversacional campo-a-campo.
 
-Arquitetura v8:
+Arquitetura v8.1:
   O agente Python é a CAMADA CONVERSACIONAL.
   O BFA (Go) é a CAMADA DE NEGÓCIO.
 
   Responsabilidades do agente:
     - Interpretar linguagem natural (IA)
     - Saber qual campo pedir agora (state machine simples)
-    - Gerar mensagens amigáveis (templates + IA para ambiguidade)
+    - Gerar mensagens amigáveis (templates)
+    - Validar formato básico dos campos (guard rail inline)
     - Devolver o campo + valor cru na resposta para o BFA validar
 
   Responsabilidades do BFA (Go):
-    - Validar formato (CNPJ 14 dígitos, CPF 11 dígitos, email com @, etc.)
-    - Validar regra de negócio (CNPJ único, representante 18+, dígito verificador)
+    - Validar regras de negócio (CNPJ único, dígito verificador, 18+)
     - Persistir dados
     - Retornar erro estruturado se inválido
     - Reenviar a mensagem com validation_error para o agente pedir correção
 
-  O agente NUNCA valida formato. O cliente manda "12345", o agente
-  devolve { current_field: "cnpj", field_value: "12345" } e o BFA decide.
+  Validação inline (agente):
+    O agente faz validações de FORMATO básicas para evitar que dados
+    claramente inválidos avancem o fluxo. Isso é um guard rail — o BFA
+    faz a validação completa depois. Quando o BFA estiver implementado,
+    essa validação será redundante (mas inofensiva).
 
 Fluxo campo-a-campo:
-  O agente pede UM campo por vez. O cliente responde. O agente identifica
-  qual campo está sendo respondido e avança. Sem ambiguidade.
+  O agente pede UM campo por vez. O cliente responde. O agente valida
+  o formato. Se inválido, pede de novo. Se válido, avança e devolve
+  o valor para o BFA validar regras de negócio.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -162,6 +167,104 @@ FIELD_FORMAT_HINTS: dict[OnboardingField, str] = {
 
 
 # =============================================================================
+# Validação de formato inline (guard rail)
+# =============================================================================
+# Estas validações evitam que dados claramente inválidos avancem o fluxo.
+# São checagens de FORMATO apenas — regras de negócio ficam no BFA.
+# Quando o BFA estiver implementado, essas validações serão redundantes.
+
+def _only_digits(value: str) -> str:
+    """Extrai apenas dígitos de uma string."""
+    return re.sub(r"\D", "", value)
+
+
+def validate_field_format(field: "OnboardingField", value: str) -> str | None:
+    """
+    Valida o formato básico de um campo.
+
+    Args:
+        field: Campo sendo validado.
+        value: Valor enviado pelo cliente.
+
+    Returns:
+        None se válido, mensagem de erro se inválido.
+    """
+    value = value.strip()
+
+    if field == OnboardingField.CNPJ:
+        digits = _only_digits(value)
+        if len(digits) != 14:
+            return (
+                f"CNPJ inválido — deve conter **14 dígitos** numéricos.\n"
+                f"Você informou {len(digits)} dígito(s).\n"
+                f"Formato: XX.XXX.XXX/XXXX-XX"
+            )
+
+    elif field == OnboardingField.RAZAO_SOCIAL:
+        if len(value) < 3:
+            return "Razão Social deve ter no mínimo **3 caracteres**."
+
+    elif field == OnboardingField.NOME_FANTASIA:
+        if len(value) < 2:
+            return "Nome Fantasia deve ter no mínimo **2 caracteres**."
+
+    elif field == OnboardingField.EMAIL:
+        if "@" not in value or "." not in value.split("@")[-1]:
+            return (
+                "E-mail inválido — deve conter **@** e um domínio válido.\n"
+                "Exemplo: contato@suaempresa.com.br"
+            )
+
+    elif field == OnboardingField.REPRESENTANTE_NAME:
+        if len(value) < 5:
+            return "Nome do representante deve ter no mínimo **5 caracteres**."
+
+    elif field == OnboardingField.REPRESENTANTE_CPF:
+        digits = _only_digits(value)
+        if len(digits) != 11:
+            return (
+                f"CPF inválido — deve conter **11 dígitos** numéricos.\n"
+                f"Você informou {len(digits)} dígito(s).\n"
+                f"Formato: XXX.XXX.XXX-XX"
+            )
+
+    elif field == OnboardingField.REPRESENTANTE_PHONE:
+        digits = _only_digits(value)
+        if len(digits) < 10:
+            return (
+                f"Telefone inválido — deve conter no mínimo **10 dígitos**.\n"
+                f"Você informou {len(digits)} dígito(s).\n"
+                f"Formato: (XX) XXXXX-XXXX"
+            )
+
+    elif field == OnboardingField.REPRESENTANTE_BIRTH_DATE:
+        # Aceita DD/MM/AAAA, DD-MM-AAAA, DD.MM.AAAA
+        date_pattern = r"^\d{2}[/\-\.]\d{2}[/\-\.]\d{4}$"
+        if not re.match(date_pattern, value):
+            return (
+                "Data de nascimento inválida.\n"
+                "Use o formato: **DD/MM/AAAA**\n"
+                "Exemplo: 15/03/1990"
+            )
+
+    elif field == OnboardingField.PASSWORD:
+        if not re.match(r"^\d{6}$", value):
+            return (
+                "Senha inválida — deve ter exatamente **6 dígitos numéricos**.\n"
+                "Sem letras ou caracteres especiais."
+            )
+
+    elif field == OnboardingField.PASSWORD_CONFIRMATION:
+        if not re.match(r"^\d{6}$", value):
+            return (
+                "Confirmação de senha inválida — deve ter exatamente "
+                "**6 dígitos numéricos**."
+            )
+
+    return None  # válido
+
+
+# =============================================================================
 # State Machine — determina o campo atual pelo histórico
 # =============================================================================
 
@@ -215,19 +318,23 @@ def determine_current_field(
             field_value=current_query,
         )
 
-    # Contar turnos de dados (a partir do turno 1).
+    # Contar turnos de dados aceitos (a partir do turno 1).
     # Turno 0 = cliente pediu abertura (não é dado).
-    # Turno 1 = cliente respondeu CNPJ.
-    # Turno 2 = cliente respondeu Razão Social.
-    # ...
-    data_turns = len(history) - 1  # descontar turno 0 (abertura)
-
-    # Coletar dados dos turnos anteriores (não inclui a query atual)
-    for i in range(data_turns):
-        if i < len(DATA_FIELDS):
-            field_enum = DATA_FIELDS[i]
-            turn = history[i + 1]  # +1 porque turno 0 é abertura
-            collected[field_enum.value] = turn["query"]
+    # Turno 1+ = cliente respondeu um campo.
+    # PORÉM: turnos de retry (rejeição) NÃO contam como dados aceitos.
+    # Identificamos retries pela presença de "⚠️" na resposta do agente
+    # (que é o marcador do template de erro de validação).
+    data_turns = 0
+    for i in range(1, len(history)):
+        answer = history[i].get("answer", "")
+        if "⚠️" in answer:
+            # Turno de retry — não contar como dado aceito
+            continue
+        data_turns += 1
+        # Coletar o dado deste turno
+        if data_turns - 1 < len(DATA_FIELDS):
+            field_enum = DATA_FIELDS[data_turns - 1]
+            collected[field_enum.value] = history[i]["query"]
 
     # Se o BFA rejeitou o último campo, repetir
     if validation_error:
@@ -248,7 +355,38 @@ def determine_current_field(
     if data_turns < len(DATA_FIELDS):
         answering_field = DATA_FIELDS[data_turns]
     else:
-        answering_field = DATA_FIELDS[-1]
+        # Todos os campos já foram respondidos nos turnos do history.
+        # A query atual não é um campo — é apenas a mensagem final.
+        return OnboardingState(
+            current_field=DATA_FIELDS[-1],
+            next_field=OnboardingField.COMPLETED,
+            collected=collected,
+            is_complete=True,
+            field_value=current_query,
+        )
+
+    # ─── Validação inline de formato (guard rail) ──────────────────
+    # Checa formato básico ANTES de avançar. Se inválido, pede de novo.
+    # Isso evita que o fluxo avance com dados lixo quando o BFA
+    # ainda não está implementado. Quando o BFA existir, a validação
+    # será redundante (BFA faz validação completa).
+    format_error = validate_field_format(answering_field, current_query)
+    if format_error:
+        logger.info(
+            "⚠️ [ONBOARDING] Inline validation failed",
+            field=answering_field.value,
+            value_preview=current_query[:20],
+            error=format_error[:80],
+        )
+        collected.pop(answering_field.value, None)
+        return OnboardingState(
+            current_field=answering_field,
+            next_field=answering_field,  # pedir o MESMO campo de novo
+            collected=collected,
+            has_validation_error=True,
+            validation_error=format_error,
+            field_value=current_query,
+        )
 
     # Incluir a resposta atual nos coletados
     collected[answering_field.value] = current_query

@@ -22,6 +22,7 @@ from src.agent.onboarding import (
     determine_current_field,
     build_onboarding_context,
     build_onboarding_response,
+    validate_field_format,
     is_onboarding_intent,
 )
 
@@ -553,6 +554,299 @@ class TestBuildOnboardingResponse:
         resp1 = build_onboarding_response(state)
         resp2 = build_onboarding_response(state)
         assert resp1 == resp2
+
+
+# =============================================================================
+# TestValidateFieldFormat — validação inline de formato
+# =============================================================================
+
+class TestValidateFieldFormat:
+    """Testes da função validate_field_format."""
+
+    # --- CNPJ ---
+    @pytest.mark.parametrize("value", [
+        "12345678000199",
+        "12.345.678/0001-99",
+        "11222333000181",
+    ])
+    def test_cnpj_valid(self, value):
+        """CNPJ com 14 dígitos deve ser aceito (qualquer formato)."""
+        assert validate_field_format(OnboardingField.CNPJ, value) is None
+
+    @pytest.mark.parametrize("value,expected_digits", [
+        ("123456", 6),
+        ("123", 3),
+        ("1234567890", 10),
+        ("abc", 0),
+    ])
+    def test_cnpj_invalid(self, value, expected_digits):
+        """CNPJ com != 14 dígitos deve ser rejeitado."""
+        error = validate_field_format(OnboardingField.CNPJ, value)
+        assert error is not None
+        assert "14 dígitos" in error
+        assert str(expected_digits) in error
+
+    # --- Razão Social ---
+    def test_razao_social_valid(self):
+        assert validate_field_format(OnboardingField.RAZAO_SOCIAL, "Empresa LTDA") is None
+
+    def test_razao_social_too_short(self):
+        error = validate_field_format(OnboardingField.RAZAO_SOCIAL, "AB")
+        assert error is not None
+        assert "3 caracteres" in error
+
+    # --- Nome Fantasia ---
+    def test_nome_fantasia_valid(self):
+        assert validate_field_format(OnboardingField.NOME_FANTASIA, "MF") is None
+
+    def test_nome_fantasia_too_short(self):
+        error = validate_field_format(OnboardingField.NOME_FANTASIA, "A")
+        assert error is not None
+        assert "2 caracteres" in error
+
+    # --- Email ---
+    @pytest.mark.parametrize("value", [
+        "contato@empresa.com",
+        "teste@empresa.com.br",
+        "a@b.co",
+    ])
+    def test_email_valid(self, value):
+        assert validate_field_format(OnboardingField.EMAIL, value) is None
+
+    @pytest.mark.parametrize("value", [
+        "email-sem-arroba",
+        "email@",
+        "@semdominio",
+        "teste@dominio",  # sem ponto no domínio
+    ])
+    def test_email_invalid(self, value):
+        error = validate_field_format(OnboardingField.EMAIL, value)
+        assert error is not None
+        assert "@" in error
+
+    # --- Representante Name ---
+    def test_representante_name_valid(self):
+        assert validate_field_format(OnboardingField.REPRESENTANTE_NAME, "João da Silva") is None
+
+    def test_representante_name_too_short(self):
+        error = validate_field_format(OnboardingField.REPRESENTANTE_NAME, "João")
+        assert error is not None
+        assert "5 caracteres" in error
+
+    # --- CPF ---
+    @pytest.mark.parametrize("value", [
+        "12345678901",
+        "123.456.789-01",
+    ])
+    def test_cpf_valid(self, value):
+        assert validate_field_format(OnboardingField.REPRESENTANTE_CPF, value) is None
+
+    def test_cpf_invalid(self):
+        error = validate_field_format(OnboardingField.REPRESENTANTE_CPF, "123456")
+        assert error is not None
+        assert "11 dígitos" in error
+
+    # --- Phone ---
+    @pytest.mark.parametrize("value", [
+        "(11) 99999-8888",
+        "11999998888",
+        "(11) 3333-4444",
+    ])
+    def test_phone_valid(self, value):
+        assert validate_field_format(OnboardingField.REPRESENTANTE_PHONE, value) is None
+
+    def test_phone_invalid(self):
+        error = validate_field_format(OnboardingField.REPRESENTANTE_PHONE, "12345")
+        assert error is not None
+        assert "10 dígitos" in error
+
+    # --- Birth Date ---
+    @pytest.mark.parametrize("value", [
+        "15/03/1990",
+        "01-12-2000",
+        "28.02.1985",
+    ])
+    def test_birth_date_valid(self, value):
+        assert validate_field_format(OnboardingField.REPRESENTANTE_BIRTH_DATE, value) is None
+
+    @pytest.mark.parametrize("value", [
+        "1990-03-15",
+        "15/03",
+        "nascimento",
+    ])
+    def test_birth_date_invalid(self, value):
+        error = validate_field_format(OnboardingField.REPRESENTANTE_BIRTH_DATE, value)
+        assert error is not None
+        assert "DD/MM/AAAA" in error
+
+    # --- Password ---
+    def test_password_valid(self):
+        assert validate_field_format(OnboardingField.PASSWORD, "123456") is None
+
+    @pytest.mark.parametrize("value", [
+        "12345",      # 5 dígitos
+        "1234567",    # 7 dígitos
+        "abcdef",     # letras
+        "12345a",     # misto
+    ])
+    def test_password_invalid(self, value):
+        error = validate_field_format(OnboardingField.PASSWORD, value)
+        assert error is not None
+        assert "6 dígitos" in error
+
+    # --- Password Confirmation ---
+    def test_password_confirmation_valid(self):
+        assert validate_field_format(OnboardingField.PASSWORD_CONFIRMATION, "123456") is None
+
+    def test_password_confirmation_invalid(self):
+        error = validate_field_format(OnboardingField.PASSWORD_CONFIRMATION, "abc")
+        assert error is not None
+        assert "6 dígitos" in error
+
+
+# =============================================================================
+# TestInlineValidationRetry — retry de campo rejeitado inline
+# =============================================================================
+
+class TestInlineValidationRetry:
+    """Testes de retry quando a validação inline rejeita um campo."""
+
+    def test_cnpj_invalid_triggers_retry(self):
+        """CNPJ inválido deve ser rejeitado e pedir CNPJ de novo."""
+        history = [{"query": "Quero abrir conta", "answer": "Vamos lá!"}]
+        state = determine_current_field(history, "123456")
+        assert state.current_field == OnboardingField.CNPJ
+        assert state.next_field == OnboardingField.CNPJ
+        assert state.has_validation_error is True
+        assert "14 dígitos" in state.validation_error
+
+    def test_cnpj_valid_after_retry(self):
+        """CNPJ válido após retry deve avançar para Razão Social."""
+        # O history tem o turno de erro (com ⚠️ na resposta)
+        history = [
+            {"query": "Quero abrir conta", "answer": "Vamos lá!"},
+            {"query": "123456", "answer": "⚠️ CNPJ inválido..."},
+        ]
+        state = determine_current_field(history, "12345678000199")
+        assert state.current_field == OnboardingField.CNPJ
+        assert state.next_field == OnboardingField.RAZAO_SOCIAL
+        assert state.has_validation_error is False
+
+    def test_multiple_retries_same_field(self):
+        """Múltiplos retries no mesmo campo devem funcionar."""
+        history = [
+            {"query": "Quero abrir conta", "answer": "Vamos lá!"},
+            {"query": "123", "answer": "⚠️ erro 1"},
+            {"query": "456", "answer": "⚠️ erro 2"},
+            {"query": "789", "answer": "⚠️ erro 3"},
+        ]
+        state = determine_current_field(history, "12345678000199")
+        assert state.current_field == OnboardingField.CNPJ
+        assert state.next_field == OnboardingField.RAZAO_SOCIAL
+        assert state.has_validation_error is False
+
+    def test_retry_does_not_count_as_data_turn(self):
+        """Turnos de retry NÃO contam na sequência de campos."""
+        # Welcome → CNPJ inválido → CNPJ válido → agora é Razão Social
+        state = determine_current_field([], "Quero abrir conta")
+        r_welcome = build_onboarding_response(state)
+
+        h = [{"query": "Quero abrir conta", "answer": r_welcome}]
+        state = determine_current_field(h, "123")
+        r_err = build_onboarding_response(state)
+
+        h.append({"query": "123", "answer": r_err})
+        state = determine_current_field(h, "12345678000199")
+        r_cnpj = build_onboarding_response(state)
+
+        # Agora Razão Social
+        h.append({"query": "12345678000199", "answer": r_cnpj})
+        state = determine_current_field(h, "Empresa LTDA")
+        assert state.current_field == OnboardingField.RAZAO_SOCIAL
+        assert state.next_field == OnboardingField.NOME_FANTASIA
+
+    def test_email_invalid_triggers_retry(self):
+        """Email inválido deve pedir email de novo."""
+        history = _make_history(3)  # CNPJ + Razão Social + Nome Fantasia
+        state = determine_current_field(history, "email-invalido")
+        assert state.current_field == OnboardingField.EMAIL
+        assert state.next_field == OnboardingField.EMAIL
+        assert state.has_validation_error is True
+        assert "@" in state.validation_error
+
+    def test_email_valid_after_retry(self):
+        """Email válido após retry deve avançar para representante."""
+        history = _make_history(3)
+        # Simular retry: turno de erro no history
+        history.append({"query": "invalido", "answer": "⚠️ E-mail inválido..."})
+        state = determine_current_field(history, "contato@empresa.com")
+        assert state.current_field == OnboardingField.EMAIL
+        assert state.next_field == OnboardingField.REPRESENTANTE_NAME
+        assert state.has_validation_error is False
+
+    def test_full_flow_with_retries(self):
+        """Fluxo completo com retries em CNPJ e Email."""
+        # 1. Welcome
+        state = determine_current_field([], "Quero abrir conta")
+        r = build_onboarding_response(state)
+        h = [{"query": "Quero abrir conta", "answer": r}]
+
+        # 2. CNPJ inválido
+        state = determine_current_field(h, "abc")
+        r = build_onboarding_response(state)
+        assert state.has_validation_error
+        h.append({"query": "abc", "answer": r})
+
+        # 3. CNPJ válido
+        state = determine_current_field(h, "12345678000199")
+        r = build_onboarding_response(state)
+        assert state.current_field == OnboardingField.CNPJ
+        assert state.next_field == OnboardingField.RAZAO_SOCIAL
+        h.append({"query": "12345678000199", "answer": r})
+
+        # 4. Razão Social
+        state = determine_current_field(h, "Empresa LTDA")
+        r = build_onboarding_response(state)
+        assert state.current_field == OnboardingField.RAZAO_SOCIAL
+        h.append({"query": "Empresa LTDA", "answer": r})
+
+        # 5. Nome Fantasia
+        state = determine_current_field(h, "Empresa")
+        r = build_onboarding_response(state)
+        assert state.current_field == OnboardingField.NOME_FANTASIA
+        h.append({"query": "Empresa", "answer": r})
+
+        # 6. Email inválido
+        state = determine_current_field(h, "sem-arroba")
+        r = build_onboarding_response(state)
+        assert state.has_validation_error
+        h.append({"query": "sem-arroba", "answer": r})
+
+        # 7. Email válido
+        state = determine_current_field(h, "contato@empresa.com")
+        r = build_onboarding_response(state)
+        assert state.current_field == OnboardingField.EMAIL
+        assert state.next_field == OnboardingField.REPRESENTANTE_NAME
+        h.append({"query": "contato@empresa.com", "answer": r})
+
+        # Continuar até completar (sem mais erros)
+        remaining = [
+            ("João da Silva Santos", OnboardingField.REPRESENTANTE_NAME),
+            ("12345678901", OnboardingField.REPRESENTANTE_CPF),
+            ("11999998888", OnboardingField.REPRESENTANTE_PHONE),
+            ("15/03/1990", OnboardingField.REPRESENTANTE_BIRTH_DATE),
+            ("123456", OnboardingField.PASSWORD),
+            ("123456", OnboardingField.PASSWORD_CONFIRMATION),
+        ]
+        for value, expected_field in remaining:
+            state = determine_current_field(h, value)
+            r = build_onboarding_response(state)
+            assert state.current_field == expected_field
+            h.append({"query": value, "answer": r})
+
+        # Último campo deve ter completado
+        assert state.is_complete is True
+        assert state.next_field == OnboardingField.COMPLETED
 
 
 # =============================================================================

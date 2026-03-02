@@ -87,7 +87,12 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
     # pedir agora e injeta instrução determinística no prompt.
     # O agente só conversa — validação fica no BFA (Go).
     history_dicts = [
-        {"query": turn.query, "answer": turn.answer}
+        {
+            "query": turn.query,
+            "answer": turn.answer,
+            "step": turn.step,
+            "validated": turn.validated,
+        }
         for turn in request.history
     ]
 
@@ -102,11 +107,13 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
         logger.info(
             "📋 [RUNNER] ONBOARDING_STATE_DETERMINED",
             customer_id=request.customer_id,
-            current_field=onboarding_state.current_field.value,
-            next_field=onboarding_state.next_field.value,
+            step=onboarding_state.step.value,
+            next_step=onboarding_state.next_step.value,
             collected_count=len(onboarding_state.collected),
             has_validation_error=onboarding_state.has_validation_error,
             is_complete=onboarding_state.is_complete,
+            retry_count=onboarding_state.retry_count,
+            max_retries_exceeded=onboarding_state.max_retries_exceeded,
         )
 
         # ─── BYPASS DO LLM ─────────────────────────────────────────
@@ -115,14 +122,15 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
         # Cada campo tem um template fixo em FIELD_PROMPTS.
         deterministic_answer = build_onboarding_response(onboarding_state)
 
-        current_field = onboarding_state.current_field.value
+        step_value = onboarding_state.step.value
+        next_step_value = onboarding_state.next_step.value
         field_value = onboarding_state.field_value or None
 
         logger.info(
             "📦 [RUNNER] ONBOARDING_RESPONSE — Resposta determinística (sem LLM)",
             customer_id=request.customer_id,
-            current_field=current_field,
-            next_field=onboarding_state.next_field.value,
+            step=step_value,
+            next_step=next_step_value,
             field_value=field_value,
             answer_length=len(deterministic_answer),
             is_complete=onboarding_state.is_complete,
@@ -137,8 +145,9 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
             intent="open_account",
             confidence=1.0,
             suggested_actions=["Continuar cadastro", "Cancelar abertura"],
-            current_field=current_field,
+            step=step_value,
             field_value=field_value,
+            next_step=next_step_value,
             metadata=AgentMetadata(
                 reasoning=[],
                 sources=[],
@@ -310,8 +319,9 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
         intent=intent,
         confidence=confidence,
         suggested_actions=suggested_actions,
-        current_field=None,
+        step=None,
         field_value=None,
+        next_step=None,
         metadata=AgentMetadata(
             reasoning=result.get("steps", []),
             sources=result.get("sources", []),

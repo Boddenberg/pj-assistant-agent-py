@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     # Nível de log: DEBUG, INFO, WARNING, ERROR.
     log_level: str = Field(default="INFO")
 
+    # Axiom — plataforma de logs centralizada.
+    # Logs JSON do structlog são enviados em batch para o Axiom.
+    # Criar conta grátis em https://axiom.co
+    axiom_token: str = Field(default="", description="API token do Axiom")
+    axiom_dataset: str = Field(default="pj-agent-logs", description="Dataset do Axiom")
+    axiom_org_id: str = Field(default="", description="Org ID do Axiom (opcional)")
+
     # ─── Segurança ──────────────────────────────────────────────────
     # Limite máximo de caracteres no input do usuário.
     # Protege contra payloads excessivos e ataques de negação de serviço.

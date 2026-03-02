@@ -1,33 +1,36 @@
 """
-Onboarding — fluxo conversacional campo-a-campo.
+Onboarding — fluxo conversacional campo-a-campo (v9).
 
-Arquitetura v8.1:
+Arquitetura:
   O agente Python é a CAMADA CONVERSACIONAL.
   O BFA (Go) é a CAMADA DE NEGÓCIO.
 
   Responsabilidades do agente:
-    - Interpretar linguagem natural (IA)
-    - Saber qual campo pedir agora (state machine simples)
-    - Gerar mensagens amigáveis (templates)
+    - Detectar intenção de abertura de conta
+    - Determinar o step atual com base no history enriquecido
     - Validar formato básico dos campos (guard rail inline)
-    - Devolver o campo + valor cru na resposta para o BFA validar
+    - Gerar respostas determinísticas (templates, sem LLM)
+    - Devolver step + valor cru + next_step na resposta
 
   Responsabilidades do BFA (Go):
     - Validar regras de negócio (CNPJ único, dígito verificador, 18+)
     - Persistir dados
-    - Retornar erro estruturado se inválido
-    - Reenviar a mensagem com validation_error para o agente pedir correção
+    - Retornar validated=True/False no history
+    - Controlar o fluxo de sessão
 
-  Validação inline (agente):
-    O agente faz validações de FORMATO básicas para evitar que dados
-    claramente inválidos avancem o fluxo. Isso é um guard rail — o BFA
-    faz a validação completa depois. Quando o BFA estiver implementado,
-    essa validação será redundante (mas inofensiva).
+Contrato do history (BFA → Agente):
+  Cada turno no history tem 4 campos:
+    - query:     O que o cliente digitou
+    - answer:    O que o agente respondeu
+    - step:      Qual step aquele turno representava (ex: "cnpj")
+    - validated: Se o BFA validou aquele campo (True/False/None)
 
-Fluxo campo-a-campo:
-  O agente pede UM campo por vez. O cliente responde. O agente valida
-  o formato. Se inválido, pede de novo. Se válido, avança e devolve
-  o valor para o BFA validar regras de negócio.
+  Com step+validated, o agente não precisa "adivinhar" onde parou.
+  Ele lê o último turno validado e sabe exatamente o próximo step.
+
+Limite de retries:
+  Se o cliente erra o mesmo campo mais de MAX_RETRIES vezes,
+  o agente encerra o onboarding com mensagem amigável.
 """
 
 from __future__ import annotations
@@ -39,6 +42,10 @@ from enum import Enum
 from src.observability.logging import get_logger
 
 logger = get_logger("onboarding")
+
+
+# Máximo de tentativas por campo antes de desistir
+MAX_RETRIES = 3
 
 
 # =============================================================================
@@ -61,7 +68,7 @@ class OnboardingField(str, Enum):
     COMPLETED = "completed"
 
 
-# Sequência ordenada — a ordem em que os campos serão pedidos
+# Sequência ordenada
 FIELD_SEQUENCE: list[OnboardingField] = [
     OnboardingField.WELCOME,
     OnboardingField.CNPJ,
@@ -83,7 +90,7 @@ DATA_FIELDS: list[OnboardingField] = [
     if f not in (OnboardingField.WELCOME, OnboardingField.COMPLETED)
 ]
 
-# Mensagens template — o que o agente diz ao pedir cada campo
+# Mensagens template
 FIELD_PROMPTS: dict[OnboardingField, str] = {
     OnboardingField.WELCOME: (
         "Que ótimo que quer abrir sua conta PJ! 😊\n"
@@ -139,7 +146,6 @@ FIELD_PROMPTS: dict[OnboardingField, str] = {
     ),
 }
 
-# Labels para o resumo final
 FIELD_LABELS: dict[OnboardingField, str] = {
     OnboardingField.CNPJ: "CNPJ",
     OnboardingField.RAZAO_SOCIAL: "Razão Social",
@@ -151,7 +157,6 @@ FIELD_LABELS: dict[OnboardingField, str] = {
     OnboardingField.REPRESENTANTE_BIRTH_DATE: "Data de nascimento",
 }
 
-# Dicas de formato por campo (fallback se o BFA não retornar mensagem)
 FIELD_FORMAT_HINTS: dict[OnboardingField, str] = {
     OnboardingField.CNPJ: "Formato: XX.XXX.XXX/XXXX-XX (14 dígitos)",
     OnboardingField.RAZAO_SOCIAL: "Mínimo 3 caracteres",
@@ -169,29 +174,22 @@ FIELD_FORMAT_HINTS: dict[OnboardingField, str] = {
 # =============================================================================
 # Validação de formato inline (guard rail)
 # =============================================================================
-# Estas validações evitam que dados claramente inválidos avancem o fluxo.
-# São checagens de FORMATO apenas — regras de negócio ficam no BFA.
-# Quando o BFA estiver implementado, essas validações serão redundantes.
 
 def _only_digits(value: str) -> str:
     """Extrai apenas dígitos de uma string."""
     return re.sub(r"\D", "", value)
 
 
-def validate_field_format(field: "OnboardingField", value: str) -> str | None:
+def validate_field_format(field_enum: OnboardingField, value: str) -> str | None:
     """
     Valida o formato básico de um campo.
-
-    Args:
-        field: Campo sendo validado.
-        value: Valor enviado pelo cliente.
 
     Returns:
         None se válido, mensagem de erro se inválido.
     """
     value = value.strip()
 
-    if field == OnboardingField.CNPJ:
+    if field_enum == OnboardingField.CNPJ:
         digits = _only_digits(value)
         if len(digits) != 14:
             return (
@@ -200,26 +198,26 @@ def validate_field_format(field: "OnboardingField", value: str) -> str | None:
                 f"Formato: XX.XXX.XXX/XXXX-XX"
             )
 
-    elif field == OnboardingField.RAZAO_SOCIAL:
+    elif field_enum == OnboardingField.RAZAO_SOCIAL:
         if len(value) < 3:
             return "Razão Social deve ter no mínimo **3 caracteres**."
 
-    elif field == OnboardingField.NOME_FANTASIA:
+    elif field_enum == OnboardingField.NOME_FANTASIA:
         if len(value) < 2:
             return "Nome Fantasia deve ter no mínimo **2 caracteres**."
 
-    elif field == OnboardingField.EMAIL:
+    elif field_enum == OnboardingField.EMAIL:
         if "@" not in value or "." not in value.split("@")[-1]:
             return (
                 "E-mail inválido — deve conter **@** e um domínio válido.\n"
                 "Exemplo: contato@suaempresa.com.br"
             )
 
-    elif field == OnboardingField.REPRESENTANTE_NAME:
+    elif field_enum == OnboardingField.REPRESENTANTE_NAME:
         if len(value) < 5:
             return "Nome do representante deve ter no mínimo **5 caracteres**."
 
-    elif field == OnboardingField.REPRESENTANTE_CPF:
+    elif field_enum == OnboardingField.REPRESENTANTE_CPF:
         digits = _only_digits(value)
         if len(digits) != 11:
             return (
@@ -228,7 +226,7 @@ def validate_field_format(field: "OnboardingField", value: str) -> str | None:
                 f"Formato: XXX.XXX.XXX-XX"
             )
 
-    elif field == OnboardingField.REPRESENTANTE_PHONE:
+    elif field_enum == OnboardingField.REPRESENTANTE_PHONE:
         digits = _only_digits(value)
         if len(digits) < 10:
             return (
@@ -237,8 +235,7 @@ def validate_field_format(field: "OnboardingField", value: str) -> str | None:
                 f"Formato: (XX) XXXXX-XXXX"
             )
 
-    elif field == OnboardingField.REPRESENTANTE_BIRTH_DATE:
-        # Aceita DD/MM/AAAA, DD-MM-AAAA, DD.MM.AAAA
+    elif field_enum == OnboardingField.REPRESENTANTE_BIRTH_DATE:
         date_pattern = r"^\d{2}[/\-\.]\d{2}[/\-\.]\d{4}$"
         if not re.match(date_pattern, value):
             return (
@@ -247,253 +244,240 @@ def validate_field_format(field: "OnboardingField", value: str) -> str | None:
                 "Exemplo: 15/03/1990"
             )
 
-    elif field == OnboardingField.PASSWORD:
+    elif field_enum == OnboardingField.PASSWORD:
         if not re.match(r"^\d{6}$", value):
             return (
                 "Senha inválida — deve ter exatamente **6 dígitos numéricos**.\n"
                 "Sem letras ou caracteres especiais."
             )
 
-    elif field == OnboardingField.PASSWORD_CONFIRMATION:
+    elif field_enum == OnboardingField.PASSWORD_CONFIRMATION:
         if not re.match(r"^\d{6}$", value):
             return (
                 "Confirmação de senha inválida — deve ter exatamente "
                 "**6 dígitos numéricos**."
             )
 
-    return None  # válido
+    return None
 
 
 # =============================================================================
-# State Machine — determina o campo atual pelo histórico
+# State Machine
 # =============================================================================
 
 @dataclass
 class OnboardingState:
-    """Estado do onboarding derivado do histórico."""
-    current_field: OnboardingField      # campo que o cliente ACABOU de responder (BFA valida)
-    next_field: OnboardingField         # campo que o LLM deve PEDIR agora
+    """Estado do onboarding derivado do history enriquecido."""
+    step: OnboardingField               # step que o cliente ACABOU de responder
+    next_step: OnboardingField          # step que o agente vai PEDIR agora
     collected: dict[str, str] = field(default_factory=dict)
     is_complete: bool = False
     has_validation_error: bool = False
     validation_error: str = ""
-    field_value: str = ""  # valor cru que o cliente enviou para o campo atual
+    field_value: str = ""               # valor cru que o cliente enviou
+    retry_count: int = 0                # quantas vezes errou o step atual
+    max_retries_exceeded: bool = False   # se excedeu o limite de retries
+
+
+def _get_next_field(current: OnboardingField) -> OnboardingField:
+    """Retorna o próximo campo na sequência após 'current'."""
+    idx = FIELD_SEQUENCE.index(current)
+    if idx + 1 < len(FIELD_SEQUENCE):
+        return FIELD_SEQUENCE[idx + 1]
+    return OnboardingField.COMPLETED
 
 
 def determine_current_field(
-    history: list[dict[str, str]],
+    history: list[dict],
     current_query: str,
     validation_error: str = "",
 ) -> OnboardingState:
     """
-    Analisa o histórico para determinar em qual campo estamos.
+    Determina o estado do onboarding com base no history enriquecido.
 
-    Conceitos-chave:
-      - current_field: campo que o cliente acabou de responder (BFA valida esse)
-      - next_field: campo que o LLM deve PEDIR ao cliente agora
-      - field_value: valor cru da query atual (BFA valida)
-
-    Lógica:
-      - history vazio: primeira mensagem → welcome (next_field = CNPJ)
-      - Turno 0 no histórico: cliente pediu abertura → agente deu welcome
-      - A partir do turno 1: cada turno = cliente respondeu um campo
-      - Se validation_error != "": o BFA rejeitou o último campo → repetir
-      - A query atual é o valor do campo que está sendo respondido agora
+    O BFA envia cada turno com step + validated. O agente:
+      1. Percorre o history para encontrar o último step validado
+      2. Determina o próximo step
+      3. Valida formato inline da query atual
+      4. Conta retries consecutivos no mesmo step
 
     Args:
-        history: Turnos anteriores [{"query": "...", "answer": "..."}]
-        current_query: Mensagem atual do cliente (valor do campo)
-        validation_error: Erro do BFA se o último campo foi rejeitado
+        history: Turnos com {query, answer, step, validated}
+        current_query: Mensagem atual do cliente
+        validation_error: Erro do BFA se rejeitou o último campo
 
     Returns:
-        OnboardingState com campo atual, próximo campo, valor e dados coletados.
+        OnboardingState completo
     """
     collected: dict[str, str] = {}
 
+    # ─── Sem history → primeira mensagem (welcome) ─────────────────
     if not history:
-        # Primeira mensagem — welcome + pedir CNPJ
         return OnboardingState(
-            current_field=OnboardingField.WELCOME,
-            next_field=OnboardingField.WELCOME,
+            step=OnboardingField.WELCOME,
+            next_step=OnboardingField.WELCOME,
             field_value=current_query,
         )
 
-    # Contar turnos de dados aceitos (a partir do turno 1).
-    # Turno 0 = cliente pediu abertura (não é dado).
-    # Turno 1+ = cliente respondeu um campo.
-    # PORÉM: turnos de retry (rejeição) NÃO contam como dados aceitos.
-    # Identificamos retries pela presença de "⚠️" na resposta do agente
-    # (que é o marcador do template de erro de validação).
-    data_turns = 0
-    for i in range(1, len(history)):
-        answer = history[i].get("answer", "")
-        if "⚠️" in answer:
-            # Turno de retry — não contar como dado aceito
+    # ─── Percorrer o history para encontrar o estado ───────────────
+    # Estratégia: identificar o último step VALIDADO pelo BFA.
+    # O próximo step é o seguinte na sequência.
+    last_validated_step: OnboardingField | None = None
+    retry_count = 0
+
+    for turn in history:
+        step_str = turn.get("step")
+        validated = turn.get("validated")
+
+        if step_str is None:
+            # Turno sem step (ex: welcome, saudação) → ignorar
             continue
-        data_turns += 1
-        # Coletar o dado deste turno
-        if data_turns - 1 < len(DATA_FIELDS):
-            field_enum = DATA_FIELDS[data_turns - 1]
-            collected[field_enum.value] = history[i]["query"]
 
-    # Se o BFA rejeitou o último campo, repetir
-    if validation_error:
-        if data_turns > 0 and data_turns <= len(DATA_FIELDS):
-            # O último campo foi rejeitado — remover dos coletados
-            rejected_field = DATA_FIELDS[data_turns - 1]
-            collected.pop(rejected_field.value, None)
-            return OnboardingState(
-                current_field=rejected_field,
-                next_field=rejected_field,  # pedir o MESMO campo de novo
-                collected=collected,
-                has_validation_error=True,
-                validation_error=validation_error,
-                field_value=current_query,
-            )
+        # Converter string para enum
+        try:
+            step_enum = OnboardingField(step_str)
+        except ValueError:
+            continue
 
-    # O campo que o cliente está respondendo AGORA com current_query
-    if data_turns < len(DATA_FIELDS):
-        answering_field = DATA_FIELDS[data_turns]
+        if validated is True:
+            last_validated_step = step_enum
+            collected[step_enum.value] = turn["query"]
+            retry_count = 0  # resetar contagem ao validar
+        elif validated is False:
+            retry_count += 1
+
+    # ─── Determinar o step que o cliente está respondendo AGORA ────
+    if last_validated_step is None:
+        # Nenhum campo validado ainda → cliente está respondendo CNPJ
+        current_step = OnboardingField.CNPJ
     else:
-        # Todos os campos já foram respondidos nos turnos do history.
-        # A query atual não é um campo — é apenas a mensagem final.
+        current_step = _get_next_field(last_validated_step)
+
+    # Se já completou todos os campos
+    if current_step == OnboardingField.COMPLETED:
         return OnboardingState(
-            current_field=DATA_FIELDS[-1],
-            next_field=OnboardingField.COMPLETED,
+            step=OnboardingField.COMPLETED,
+            next_step=OnboardingField.COMPLETED,
             collected=collected,
             is_complete=True,
             field_value=current_query,
         )
 
+    # ─── Verificar limite de retries ───────────────────────────────
+    # Se o BFA retornou validated=False no último turno, contar como retry.
+    # Se já mandou validation_error, é mais um retry.
+    if validation_error:
+        retry_count += 1
+
+    if retry_count >= MAX_RETRIES:
+        logger.info(
+            "🚫 [ONBOARDING] Max retries exceeded",
+            step=current_step.value,
+            retry_count=retry_count,
+            max_retries=MAX_RETRIES,
+        )
+        return OnboardingState(
+            step=current_step,
+            next_step=current_step,
+            collected=collected,
+            has_validation_error=True,
+            validation_error=validation_error or "Limite de tentativas excedido",
+            field_value=current_query,
+            retry_count=retry_count,
+            max_retries_exceeded=True,
+        )
+
+    # ─── Se o BFA rejeitou → pedir o mesmo campo de novo ──────────
+    if validation_error:
+        return OnboardingState(
+            step=current_step,
+            next_step=current_step,
+            collected=collected,
+            has_validation_error=True,
+            validation_error=validation_error,
+            field_value=current_query,
+            retry_count=retry_count,
+        )
+
     # ─── Validação inline de formato (guard rail) ──────────────────
-    # Checa formato básico ANTES de avançar. Se inválido, pede de novo.
-    # Isso evita que o fluxo avance com dados lixo quando o BFA
-    # ainda não está implementado. Quando o BFA existir, a validação
-    # será redundante (BFA faz validação completa).
-    format_error = validate_field_format(answering_field, current_query)
+    format_error = validate_field_format(current_step, current_query)
     if format_error:
+        retry_count += 1
+
         logger.info(
             "⚠️ [ONBOARDING] Inline validation failed",
-            field=answering_field.value,
+            step=current_step.value,
             value_preview=current_query[:20],
-            error=format_error[:80],
+            retry_count=retry_count,
         )
-        collected.pop(answering_field.value, None)
+
+        if retry_count >= MAX_RETRIES:
+            return OnboardingState(
+                step=current_step,
+                next_step=current_step,
+                collected=collected,
+                has_validation_error=True,
+                validation_error=format_error,
+                field_value=current_query,
+                retry_count=retry_count,
+                max_retries_exceeded=True,
+            )
+
         return OnboardingState(
-            current_field=answering_field,
-            next_field=answering_field,  # pedir o MESMO campo de novo
+            step=current_step,
+            next_step=current_step,
             collected=collected,
             has_validation_error=True,
             validation_error=format_error,
             field_value=current_query,
+            retry_count=retry_count,
         )
 
-    # Incluir a resposta atual nos coletados
-    collected[answering_field.value] = current_query
+    # ─── Formato válido → avançar ──────────────────────────────────
+    collected[current_step.value] = current_query
+    next_step = _get_next_field(current_step)
 
-    # Determinar o PRÓXIMO campo a pedir
-    next_index = data_turns + 1
-    if next_index >= len(DATA_FIELDS):
-        # Todos os campos coletados → completo
-        return OnboardingState(
-            current_field=answering_field,
-            next_field=OnboardingField.COMPLETED,
-            collected=collected,
-            is_complete=True,
-            field_value=current_query,
-        )
-
-    next_field = DATA_FIELDS[next_index]
+    is_complete = next_step == OnboardingField.COMPLETED
 
     logger.info(
         "📋 [ONBOARDING] State determined",
-        answering_field=answering_field.value,
-        next_field=next_field.value,
+        step=current_step.value,
+        next_step=next_step.value,
         collected_count=len(collected),
-        collected_fields=list(collected.keys()),
-        history_turns=len(history),
-        data_turns=data_turns,
+        is_complete=is_complete,
     )
 
     return OnboardingState(
-        current_field=answering_field,
-        next_field=next_field,
+        step=current_step,
+        next_step=next_step,
         collected=collected,
+        is_complete=is_complete,
         field_value=current_query,
     )
 
 
 # =============================================================================
-# Gerador de contexto para o LLM
-# =============================================================================
-
-def build_onboarding_context(state: OnboardingState) -> str:
-    """
-    Gera instrução determinística para o LLM.
-
-    O LLM recebe o template de resposta e os dados já coletados.
-    Só precisa humanizar o texto — a lógica está em Python.
-    """
-    lines: list[str] = []
-    lines.append("\n## [INSTRUÇÃO DE ONBOARDING — SIGA À RISCA]")
-    lines.append("IMPORTANTE: NÃO chame search_knowledge_base para onboarding. "
-                 "Use SOMENTE as instruções abaixo.")
-
-    if state.is_complete:
-        lines.append("\n### ✅ ONBOARDING COMPLETO!")
-        lines.append("Todos os dados foram coletados com sucesso.")
-        lines.append("Informe ao cliente que o cadastro será processado.")
-        lines.append("\nResumo dos dados (NÃO inclua a senha):")
-        for fld in DATA_FIELDS:
-            if fld in (OnboardingField.PASSWORD, OnboardingField.PASSWORD_CONFIRMATION):
-                continue
-            value = state.collected.get(fld.value, "—")
-            label = FIELD_LABELS.get(fld, fld.value)
-            lines.append(f"- {label}: {value}")
-        return "\n".join(lines)
-
-    if state.has_validation_error:
-        label = FIELD_LABELS.get(state.next_field, state.next_field.value)
-        hint = FIELD_FORMAT_HINTS.get(state.next_field, "")
-        lines.append(f"\n### ⚠️ Dado rejeitado: {label}")
-        lines.append(f"Erro: {state.validation_error}")
-        if hint:
-            lines.append(f"Formato esperado: {hint}")
-        lines.append("\n→ AÇÃO: Informe o erro de forma amigável e peça para digitar novamente.")
-        lines.append(f"   Peça SOMENTE o campo: {label}")
-        return "\n".join(lines)
-
-    # Campo normal — pedir ao cliente o PRÓXIMO campo
-    prompt_text = FIELD_PROMPTS.get(state.next_field, "")
-    label = FIELD_LABELS.get(state.next_field, state.next_field.value)
-    lines.append(f"\n### Próximo campo: {label}")
-    lines.append(f"\nResponda ao cliente com esta mensagem (pode humanizar levemente):")
-    lines.append(f'"{prompt_text}"')
-    lines.append("\n→ AÇÃO: Peça SOMENTE este campo. NÃO peça outros dados.")
-
-    return "\n".join(lines)
-
-
-# =============================================================================
-# Detecção de intenção de onboarding
+# Gerador de resposta determinística (sem LLM)
 # =============================================================================
 
 def build_onboarding_response(state: OnboardingState) -> str:
     """
     Gera a resposta FINAL para o cliente — determinística, sem LLM.
 
-    Arquitetura v8.1:
-      O onboarding não precisa de IA para gerar respostas.
-      Cada passo é um template fixo. Usar o LLM causava alucinações
-      (ex: LLM respondia "E-mail recebido! Confirme telefone" quando
-      a instrução dizia "Nome Fantasia recebido! Informe e-mail").
-
-      Solução: bypass total do LLM para onboarding.
-      O template do FIELD_PROMPTS É a resposta final.
-
     Returns:
         String com a resposta pronta para o cliente.
     """
+    # ─── Max retries excedido → encerrar com mensagem amigável ─────
+    if state.max_retries_exceeded:
+        label = FIELD_LABELS.get(state.step, state.step.value)
+        return (
+            f"Não conseguimos validar o **{label}** após algumas tentativas. 😕\n\n"
+            "Quando estiver com os dados em mãos para a abertura de conta, "
+            "estaremos por aqui! 😊\n\n"
+            "É só digitar **\"abrir conta\"** para recomeçar."
+        )
+
+    # ─── Onboarding completo ──────────────────────────────────────
     if state.is_complete:
         lines = ["Todos os dados foram recebidos! ✅🎉\n"]
         lines.append("Confira o resumo do cadastro:\n")
@@ -509,9 +493,10 @@ def build_onboarding_response(state: OnboardingState) -> str:
         )
         return "\n".join(lines)
 
+    # ─── Erro de validação → pedir de novo ─────────────────────────
     if state.has_validation_error:
-        label = FIELD_LABELS.get(state.next_field, state.next_field.value)
-        hint = FIELD_FORMAT_HINTS.get(state.next_field, "")
+        label = FIELD_LABELS.get(state.next_step, state.next_step.value)
+        hint = FIELD_FORMAT_HINTS.get(state.next_step, "")
         lines = [f"⚠️ O dado informado para **{label}** não está válido."]
         lines.append(f"Motivo: {state.validation_error}")
         if hint:
@@ -519,24 +504,74 @@ def build_onboarding_response(state: OnboardingState) -> str:
         lines.append(f"\nPor favor, informe o **{label}** novamente.")
         return "\n".join(lines)
 
-    # Campo normal — usar o template diretamente
-    prompt_text = FIELD_PROMPTS.get(state.next_field, "")
+    # ─── Campo normal → usar template ─────────────────────────────
+    prompt_text = FIELD_PROMPTS.get(state.next_step, "")
     if prompt_text:
         return prompt_text
 
-    # Fallback (não deveria chegar aqui)
-    label = FIELD_LABELS.get(state.next_field, state.next_field.value)
+    label = FIELD_LABELS.get(state.next_step, state.next_step.value)
     return f"Agora preciso do **{label}**."
 
 
-def is_onboarding_intent(query: str, history: list[dict[str, str]]) -> bool:
+# =============================================================================
+# Gerador de contexto para o LLM (mantido para compatibilidade)
+# =============================================================================
+
+def build_onboarding_context(state: OnboardingState) -> str:
+    """Gera instrução determinística para o LLM (legado, não usado em v9)."""
+    lines: list[str] = []
+    lines.append("\n## [INSTRUÇÃO DE ONBOARDING — SIGA À RISCA]")
+    lines.append("IMPORTANTE: NÃO chame search_knowledge_base para onboarding.")
+
+    if state.is_complete:
+        lines.append("\n### ✅ ONBOARDING COMPLETO!")
+        lines.append("Todos os dados foram coletados com sucesso.")
+        lines.append("\nResumo dos dados (NÃO inclua a senha):")
+        for fld in DATA_FIELDS:
+            if fld in (OnboardingField.PASSWORD, OnboardingField.PASSWORD_CONFIRMATION):
+                continue
+            value = state.collected.get(fld.value, "—")
+            label = FIELD_LABELS.get(fld, fld.value)
+            lines.append(f"- {label}: {value}")
+        return "\n".join(lines)
+
+    if state.has_validation_error:
+        label = FIELD_LABELS.get(state.next_step, state.next_step.value)
+        hint = FIELD_FORMAT_HINTS.get(state.next_step, "")
+        lines.append(f"\n### ⚠️ Dado rejeitado: {label}")
+        lines.append(f"Erro: {state.validation_error}")
+        if hint:
+            lines.append(f"Formato esperado: {hint}")
+        lines.append(f"\n→ AÇÃO: Peça SOMENTE o campo: {label}")
+        return "\n".join(lines)
+
+    prompt_text = FIELD_PROMPTS.get(state.next_step, "")
+    label = FIELD_LABELS.get(state.next_step, state.next_step.value)
+    lines.append(f"\n### Próximo campo: {label}")
+    lines.append(f'\n"{prompt_text}"')
+    lines.append("\n→ AÇÃO: Peça SOMENTE este campo.")
+    return "\n".join(lines)
+
+
+# =============================================================================
+# Detecção de intenção de onboarding
+# =============================================================================
+
+def is_onboarding_intent(query: str, history: list[dict]) -> bool:
     """
     Detecta se a conversa é sobre abertura de conta.
 
     Verifica:
-      1. Se o histórico já contém contexto de onboarding
-      2. Se a query atual menciona abertura de conta
+      1. Se algum turno no history tem step preenchido (já é onboarding)
+      2. Se o histórico contém keywords de onboarding
+      3. Se a query atual menciona abertura de conta
     """
+    # Se algum turno já tem step → é onboarding em andamento
+    for turn in history:
+        if turn.get("step") is not None:
+            return True
+
+    # Keywords no histórico
     onboarding_keywords_in_history = [
         "abrir", "abertura", "conta pj", "conta PJ",
         "cnpj", "razão social", "razao social", "nome fantasia",
@@ -548,6 +583,7 @@ def is_onboarding_intent(query: str, history: list[dict[str, str]]) -> bool:
         if any(kw.lower() in combined for kw in onboarding_keywords_in_history):
             return True
 
+    # Keywords na query atual
     onboarding_keywords_query = [
         "abrir conta", "abertura", "criar conta", "nova conta",
         "quero conta", "abrir uma conta", "abrir minha conta",

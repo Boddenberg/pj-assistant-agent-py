@@ -93,12 +93,23 @@ class ChatMessage(BaseModel):
     """
     Mensagem do histórico de conversa — enviada pelo BFA.
 
-    O BFA mantém as últimas 5 interações do cliente na sessão
+    O BFA mantém as últimas interações do cliente na sessão
     e envia neste formato para dar continuidade à conversa.
-    Cada par query/answer representa um turno completo.
+
+    Campos base:
+      - query:     O que o cliente digitou naquele turno
+      - answer:    O que o agente respondeu
+
+    Campos de onboarding (preenchidos pelo BFA):
+      - step:      Qual step/campo aquele turno representava (ex: "cnpj", "email")
+                   None se não é onboarding
+      - validated: Se o BFA validou aquele campo com sucesso
+                   None se não é onboarding
     """
     query: str                                          # Pergunta do cliente naquele turno
     answer: str                                         # Resposta do agente naquele turno
+    step: str | None = None                             # Step do onboarding (ex: "cnpj")
+    validated: bool | None = None                       # BFA validou? True/False/None
 
 
 class AgentRequest(BaseModel):
@@ -165,6 +176,12 @@ class AgentResponse(BaseModel):
       - confidence  → confiança da resposta (0.0-1.0). Abaixo de 0.5 = escalar para humano
       - suggested_actions → sugestões para o front renderizar como opções ao cliente
 
+    Campos de ONBOARDING (BFA usa para saber o que validar):
+      - step        → step atual que o cliente respondeu (ex: "cnpj"). BFA usa pra
+                      cair no método de validação correto. null = não é onboarding.
+      - field_value → valor cru que o cliente digitou. BFA valida.
+      - next_step   → próximo step que será pedido. BFA pode preparar o método.
+
     Campos de APRESENTAÇÃO (BFA repassa ao front):
       - answer      → texto para exibir ao cliente no chat
 
@@ -177,8 +194,9 @@ class AgentResponse(BaseModel):
     intent: str | None = None                                  # Intenção classificada
     confidence: float = 1.0                                    # Confiança (0.0-1.0)
     suggested_actions: list[str] = Field(default_factory=list)  # Sugestões para o front
-    current_field: str | None = None                           # Campo de onboarding atual (BFA valida)
+    step: str | None = None                                    # Step atual do onboarding (BFA valida)
     field_value: str | None = None                             # Valor cru do campo (BFA valida)
+    next_step: str | None = None                               # Próximo step a ser pedido
     metadata: AgentMetadata = Field(default_factory=AgentMetadata)  # Observabilidade
     timestamp: str = Field(
         default_factory=lambda: datetime.utcnow().isoformat(),

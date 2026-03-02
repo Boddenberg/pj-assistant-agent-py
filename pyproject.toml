@@ -52,12 +52,14 @@ dependencies = [
     # prometheus-client: métricas expostas em /metrics (scraping)
     # opentelemetry-*: tracing distribuído (spans, trace_id)
     # structlog: logging estruturado em JSON (machine-readable)
+    # axiom-py: cliente oficial Axiom (logs centralizados, 500GB/mês free)
     "langfuse>=2.0.0",
     "prometheus-client>=0.21.0",
     "opentelemetry-api>=1.25.0",
     "opentelemetry-sdk>=1.25.0",
     "opentelemetry-instrumentation-fastapi>=0.46b0",
     "structlog>=24.0.0",
+    "axiom-py>=1.0.0",
 
     # --- Config & Utils ---
     # pydantic: validação de dados + serialização (modelos de domínio)

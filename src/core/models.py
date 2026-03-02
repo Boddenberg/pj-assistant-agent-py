@@ -139,6 +139,7 @@ class AgentRequest(BaseModel):
     history: list[ChatMessage] = Field(                  # Histórico de conversa (até 5 turnos)
         default_factory=list,
     )
+    validation_error: str = ""                            # Erro do BFA ao validar último campo
 
 
 class AgentMetadata(BaseModel):
@@ -176,6 +177,8 @@ class AgentResponse(BaseModel):
     intent: str | None = None                                  # Intenção classificada
     confidence: float = 1.0                                    # Confiança (0.0-1.0)
     suggested_actions: list[str] = Field(default_factory=list)  # Sugestões para o front
+    current_field: str | None = None                           # Campo de onboarding atual (BFA valida)
+    field_value: str | None = None                             # Valor cru do campo (BFA valida)
     metadata: AgentMetadata = Field(default_factory=AgentMetadata)  # Observabilidade
     timestamp: str = Field(
         default_factory=lambda: datetime.utcnow().isoformat(),

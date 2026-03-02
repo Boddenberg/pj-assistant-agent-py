@@ -1,501 +1,531 @@
 """
-Testes unitários para o módulo de onboarding.
+Testes unitários — onboarding campo-a-campo (v8.0.0).
 
-Cobre:
-  - Validadores de formato (CNPJ, CPF, e-mail, telefone, data, senha)
-  - Extrator de dados de texto livre
-  - State Machine (fluxo de 4 etapas)
-  - build_onboarding_context (geração de instrução para o LLM)
-  - is_onboarding_intent (detecção de intenção)
+Testa o módulo de onboarding conversacional que:
+  - Determina qual campo pedir com base no histórico
+  - Gera instruções determinísticas para o LLM
+  - Detecta intenção de abertura de conta
+
+O agente NÃO valida dados — isso é responsabilidade do BFA (Go).
 """
 
 import pytest
-
 from src.agent.onboarding import (
-    OnboardingValidator,
-    OnboardingExtractor,
-    OnboardingStateMachine,
+    OnboardingField,
     OnboardingState,
+    FIELD_SEQUENCE,
+    DATA_FIELDS,
+    FIELD_PROMPTS,
+    FIELD_LABELS,
+    FIELD_FORMAT_HINTS,
+    determine_current_field,
     build_onboarding_context,
     is_onboarding_intent,
-    STEP_FIELDS,
-    FIELD_LABELS,
 )
 
 
 # =============================================================================
-# OnboardingValidator
+# Helpers
 # =============================================================================
 
-class TestValidateCnpj:
-    def test_valid_cnpj_formatted(self):
-        result = OnboardingValidator.validate_cnpj("12.345.678/0001-90")
-        assert result.valid is True
-        assert result.value == "12.345.678/0001-90"
+def _make_history(n_data_turns: int) -> list[dict[str, str]]:
+    """Cria histórico simulado com n_data_turns campos já respondidos."""
+    history: list[dict[str, str]] = []
 
-    def test_valid_cnpj_digits_only(self):
-        result = OnboardingValidator.validate_cnpj("12345678000190")
-        assert result.valid is True
-        assert result.value == "12.345.678/0001-90"
+    # Turno 0 — cliente pediu abertura
+    history.append({"query": "Quero abrir minha conta PJ", "answer": "Vamos lá!"})
 
-    def test_invalid_cnpj_too_short(self):
-        result = OnboardingValidator.validate_cnpj("12.345.678/1-90")
-        assert result.valid is False
-        assert "14 dígitos" in result.error
+    # Turnos de dados (1 campo por turno)
+    field_values = [
+        "12.345.678/0001-99",
+        "Empresa Teste LTDA",
+        "Empresa Teste",
+        "contato@empresa.com",
+        "João da Silva Santos",
+        "123.456.789-00",
+        "(11) 99999-8888",
+        "15/03/1990",
+        "123456",
+        "123456",
+    ]
 
-    def test_invalid_cnpj_too_long(self):
-        result = OnboardingValidator.validate_cnpj("123456789012345")
-        assert result.valid is False
+    for i in range(min(n_data_turns, len(field_values))):
+        history.append({
+            "query": field_values[i],
+            "answer": f"Campo {i + 1} recebido! ✅",
+        })
 
-    def test_invalid_cnpj_empty(self):
-        result = OnboardingValidator.validate_cnpj("")
-        assert result.valid is False
-
-
-class TestValidateCpf:
-    def test_valid_cpf_formatted(self):
-        result = OnboardingValidator.validate_cpf("123.456.789-00")
-        assert result.valid is True
-        assert result.value == "123.456.789-00"
-
-    def test_valid_cpf_digits_only(self):
-        result = OnboardingValidator.validate_cpf("12345678900")
-        assert result.valid is True
-        assert result.value == "123.456.789-00"
-
-    def test_invalid_cpf_too_short(self):
-        result = OnboardingValidator.validate_cpf("1234567890")
-        assert result.valid is False
-        assert "11 dígitos" in result.error
-
-    def test_invalid_cpf_too_long(self):
-        result = OnboardingValidator.validate_cpf("123456789001")
-        assert result.valid is False
-
-
-class TestValidateEmail:
-    def test_valid_email(self):
-        result = OnboardingValidator.validate_email("contato@acmesolucoes.com.br")
-        assert result.valid is True
-        assert result.value == "contato@acmesolucoes.com.br"
-
-    def test_invalid_email_no_at(self):
-        result = OnboardingValidator.validate_email("contatoacmesolucoes.com.br")
-        assert result.valid is False
-        assert "@" in result.error
-
-    def test_invalid_email_no_domain(self):
-        result = OnboardingValidator.validate_email("contato@")
-        assert result.valid is False
-
-    def test_valid_email_with_spaces(self):
-        result = OnboardingValidator.validate_email("  user@domain.com  ")
-        assert result.valid is True
-        assert result.value == "user@domain.com"
-
-
-class TestValidateRazaoSocial:
-    def test_valid(self):
-        result = OnboardingValidator.validate_razao_social("ACME SOLUCOES LTDA")
-        assert result.valid is True
-
-    def test_too_short(self):
-        result = OnboardingValidator.validate_razao_social("AB")
-        assert result.valid is False
-        assert "3 caracteres" in result.error
-
-
-class TestValidateNomeFantasia:
-    def test_valid(self):
-        result = OnboardingValidator.validate_nome_fantasia("ACME")
-        assert result.valid is True
-
-    def test_too_short(self):
-        result = OnboardingValidator.validate_nome_fantasia("A")
-        assert result.valid is False
-        assert "2 caracteres" in result.error
-
-
-class TestValidateRepresentanteName:
-    def test_valid(self):
-        result = OnboardingValidator.validate_representante_name("Victor Campagnola")
-        assert result.valid is True
-
-    def test_too_short(self):
-        result = OnboardingValidator.validate_representante_name("Ana")
-        assert result.valid is False
-        assert "5 caracteres" in result.error
-
-
-class TestValidatePhone:
-    def test_valid_11_digits(self):
-        result = OnboardingValidator.validate_phone("(11) 98765-4321")
-        assert result.valid is True
-        assert result.value == "(11) 98765-4321"
-
-    def test_valid_10_digits(self):
-        result = OnboardingValidator.validate_phone("(11) 8765-4321")
-        assert result.valid is True
-        assert result.value == "(11) 8765-4321"
-
-    def test_valid_digits_only(self):
-        result = OnboardingValidator.validate_phone("11987654321")
-        assert result.valid is True
-
-    def test_invalid_too_short(self):
-        result = OnboardingValidator.validate_phone("1198765")
-        assert result.valid is False
-        assert "10 ou 11 dígitos" in result.error
-
-
-class TestValidateBirthDate:
-    def test_valid_date(self):
-        result = OnboardingValidator.validate_birth_date("19/02/1996")
-        assert result.valid is True
-        assert result.value == "19/02/1996"
-
-    def test_valid_date_single_digit_day(self):
-        result = OnboardingValidator.validate_birth_date("1/2/1990")
-        assert result.valid is True
-        assert result.value == "01/02/1990"
-
-    def test_invalid_format(self):
-        result = OnboardingValidator.validate_birth_date("1996-02-19")
-        assert result.valid is False
-
-    def test_invalid_underage(self):
-        result = OnboardingValidator.validate_birth_date("01/01/2020")
-        assert result.valid is False
-        assert "18 anos" in result.error
-
-    def test_invalid_date_values(self):
-        result = OnboardingValidator.validate_birth_date("32/13/1990")
-        assert result.valid is False
-
-
-class TestValidatePassword:
-    def test_valid(self):
-        result = OnboardingValidator.validate_password("123456")
-        assert result.valid is True
-        assert result.value == "123456"
-
-    def test_invalid_letters(self):
-        result = OnboardingValidator.validate_password("12345a")
-        assert result.valid is False
-
-    def test_invalid_too_short(self):
-        result = OnboardingValidator.validate_password("12345")
-        assert result.valid is False
-
-    def test_invalid_too_long(self):
-        result = OnboardingValidator.validate_password("1234567")
-        assert result.valid is False
-
-
-class TestValidatePasswordConfirmation:
-    def test_matching(self):
-        result = OnboardingValidator.validate_password_confirmation("123456", "123456")
-        assert result.valid is True
-
-    def test_not_matching(self):
-        result = OnboardingValidator.validate_password_confirmation("654321", "123456")
-        assert result.valid is False
-        assert "não coincidem" in result.error
+    return history
 
 
 # =============================================================================
-# OnboardingExtractor
+# TestOnboardingField — enum e sequência
 # =============================================================================
 
-class TestOnboardingExtractor:
-    def test_extract_cnpj(self):
-        result = OnboardingExtractor.extract_from_message(
-            "CNPJ 12.345.678/0001-90, Razão Social ACME LTDA"
-        )
-        assert "cnpj" in result
-        assert result["cnpj"] == "12.345.678/0001-90"
+class TestOnboardingField:
+    """Testes da enum OnboardingField e constantes relacionadas."""
 
-    def test_extract_email(self):
-        result = OnboardingExtractor.extract_from_message(
-            "E-mail contato@acmesolucoes.com.br"
-        )
-        assert "email" in result
-        assert result["email"] == "contato@acmesolucoes.com.br"
+    def test_field_count(self):
+        """São 12 membros no enum (welcome + 10 dados + completed)."""
+        assert len(OnboardingField) == 12
 
-    def test_extract_cpf(self):
-        result = OnboardingExtractor.extract_from_message(
-            "CPF: 123.456.789-00"
-        )
-        assert "representanteCpf" in result
+    def test_field_sequence_order(self):
+        """A sequência começa com WELCOME e termina com COMPLETED."""
+        assert FIELD_SEQUENCE[0] == OnboardingField.WELCOME
+        assert FIELD_SEQUENCE[-1] == OnboardingField.COMPLETED
 
-    def test_extract_phone(self):
-        result = OnboardingExtractor.extract_from_message(
-            "Telefone: (11) 98765-4321"
-        )
-        assert "representantePhone" in result
+    def test_data_fields_exclude_welcome_and_completed(self):
+        """DATA_FIELDS tem 10 campos (sem welcome e completed)."""
+        assert len(DATA_FIELDS) == 10
+        assert OnboardingField.WELCOME not in DATA_FIELDS
+        assert OnboardingField.COMPLETED not in DATA_FIELDS
 
-    def test_extract_birth_date(self):
-        result = OnboardingExtractor.extract_from_message(
-            "Data de nascimento: 19/02/1996"
-        )
-        assert "representanteBirthDate" in result
-        assert result["representanteBirthDate"] == "19/02/1996"
+    def test_data_fields_in_correct_order(self):
+        """DATA_FIELDS segue a ordem: CNPJ → ... → PASSWORD_CONFIRMATION."""
+        assert DATA_FIELDS[0] == OnboardingField.CNPJ
+        assert DATA_FIELDS[-1] == OnboardingField.PASSWORD_CONFIRMATION
 
-    def test_extract_password(self):
-        result = OnboardingExtractor.extract_from_message("senha 123456")
-        assert "password" in result
-        assert result["password"] == "123456"
+    def test_every_data_field_has_prompt(self):
+        """Cada campo de dados deve ter um template de prompt."""
+        for field in DATA_FIELDS:
+            assert field in FIELD_PROMPTS, f"{field.value} missing from FIELD_PROMPTS"
 
-    def test_extract_razao_social(self):
-        result = OnboardingExtractor.extract_from_message(
-            "Razão Social ACME SOLUCOES LTDA, Nome Fantasia ACME"
-        )
-        assert "razaoSocial" in result
-        assert "ACME SOLUCOES LTDA" in result["razaoSocial"]
+    def test_welcome_has_prompt(self):
+        """Welcome também tem prompt."""
+        assert OnboardingField.WELCOME in FIELD_PROMPTS
 
-    def test_extract_nome_fantasia(self):
-        result = OnboardingExtractor.extract_from_message(
-            "Nome Fantasia ACME Solucoes, E-mail contato@x.com"
-        )
-        assert "nomeFantasia" in result
-        assert "ACME Solucoes" in result["nomeFantasia"]
+    def test_every_data_field_has_format_hint(self):
+        """Cada campo de dados deve ter dica de formato."""
+        for field in DATA_FIELDS:
+            assert field in FIELD_FORMAT_HINTS, f"{field.value} missing from FIELD_FORMAT_HINTS"
 
-    def test_extract_multiple_fields(self):
-        result = OnboardingExtractor.extract_from_message(
-            "CNPJ 12.345.678/0001-90, Razão Social ACME SOLUCOES EMPRESARIAIS LTDA, "
-            "Nome Fantasia ACME Solucoes, E-mail contato@acmesolucoes.com.br"
-        )
-        assert "cnpj" in result
-        assert "email" in result
-
-    def test_no_false_positive_password(self):
-        """Senha de 6 dígitos não deve ser extraída de CNPJ/CPF."""
-        result = OnboardingExtractor.extract_from_message(
-            "CNPJ 12.345.678/0001-90"
-        )
-        assert "password" not in result
-
-    def test_extract_representante_name(self):
-        result = OnboardingExtractor.extract_from_message(
-            "Victor Campagnola, CPF: 123.456.789-00"
-        )
-        assert "representanteName" in result
-        assert "Victor Campagnola" in result["representanteName"]
+    def test_label_fields(self):
+        """Labels existem para os campos que aparecem no resumo final."""
+        for field in [
+            OnboardingField.CNPJ,
+            OnboardingField.RAZAO_SOCIAL,
+            OnboardingField.NOME_FANTASIA,
+            OnboardingField.EMAIL,
+            OnboardingField.REPRESENTANTE_NAME,
+            OnboardingField.REPRESENTANTE_CPF,
+            OnboardingField.REPRESENTANTE_PHONE,
+            OnboardingField.REPRESENTANTE_BIRTH_DATE,
+        ]:
+            assert field in FIELD_LABELS, f"{field.value} missing from FIELD_LABELS"
 
 
 # =============================================================================
-# OnboardingStateMachine
+# TestDetermineCurrentField — state machine
 # =============================================================================
 
-class TestOnboardingStateMachine:
-    def setup_method(self):
-        self.sm = OnboardingStateMachine()
+class TestDetermineCurrentField:
+    """Testes da função determine_current_field."""
 
-    def test_initial_state_step_1(self):
-        """Sem histórico, deve estar na etapa 1."""
-        state = self.sm.process([], "quero abrir conta")
-        assert state.current_step == 1
-        assert len(state.collected) == 0
-        assert "cnpj" in state.pending_fields
+    def test_empty_history_returns_welcome(self):
+        """Sem histórico → WELCOME (primeira interação)."""
+        state = determine_current_field([], "Quero abrir conta")
+        assert state.current_field == OnboardingField.WELCOME
+        assert state.field_value == "Quero abrir conta"
+        assert not state.is_complete
+        assert not state.has_validation_error
 
-    def test_step_1_collects_data(self):
-        """Deve coletar dados da etapa 1."""
-        state = self.sm.process(
-            [],
-            "CNPJ 12.345.678/0001-90, Razão Social ACME SOLUCOES EMPRESARIAIS LTDA, "
-            "Nome Fantasia ACME Solucoes, E-mail contato@acmesolucoes.com.br",
-        )
-        assert "cnpj" in state.collected
-        assert "email" in state.collected
-        # Should advance to step 2 if all step 1 fields collected
-        if all(f in state.collected for f in STEP_FIELDS[1]):
-            assert state.current_step == 2
+    def test_after_welcome_asks_cnpj(self):
+        """Após turno 0 (welcome), o próximo campo é CNPJ."""
+        history = _make_history(0)  # só turno 0 (abertura)
+        state = determine_current_field(history, "12.345.678/0001-99")
+        assert state.current_field == OnboardingField.CNPJ
+        assert state.field_value == "12.345.678/0001-99"
 
-    def test_step_1_invalid_cnpj(self):
-        """CNPJ inválido deve gerar erro e não avançar."""
-        state = self.sm.process(
-            [],
-            "CNPJ 12.345.678/1-90, Razão Social ACME LTDA, "
-            "Nome Fantasia ACME, E-mail contato@acme.com",
-        )
-        assert len(state.errors) > 0
-        assert any("CNPJ" in e for e in state.errors)
+    def test_after_cnpj_asks_razao_social(self):
+        """Após 1 campo respondido (CNPJ), pede Razão Social."""
+        history = _make_history(1)
+        state = determine_current_field(history, "Empresa Teste LTDA")
+        assert state.current_field == OnboardingField.RAZAO_SOCIAL
 
-    def test_step_1_invalid_email(self):
-        """E-mail sem @ deve gerar erro."""
-        state = self.sm.process(
-            [],
-            "CNPJ 12.345.678/0001-90, Razão Social ACME LTDA, "
-            "Nome Fantasia ACME, E-mail contatoacme.com",
-        )
-        # Email sem @ é capturado pelo fallback e validação rejeita
-        assert "email" not in state.collected
-        assert len(state.errors) > 0
-        assert any("E-mail" in e or "e-mail" in e.lower() for e in state.errors)
+    def test_after_razao_social_asks_nome_fantasia(self):
+        """Após 2 campos, pede Nome Fantasia."""
+        history = _make_history(2)
+        state = determine_current_field(history, "Empresa Teste")
+        assert state.current_field == OnboardingField.NOME_FANTASIA
 
-    def test_step_2_from_history(self):
-        """Após etapa 1 completa no histórico, deve estar na etapa 2."""
-        history = [
-            {
-                "query": "quero abrir conta",
-                "answer": "Vou te ajudar! Me envie CNPJ, Razão Social, Nome Fantasia e E-mail.",
-            },
-            {
-                "query": "CNPJ 12.345.678/0001-90, Razão Social ACME SOLUCOES EMPRESARIAIS LTDA, "
-                         "Nome Fantasia ACME Solucoes, E-mail contato@acmesolucoes.com.br",
-                "answer": "Perfeito! Agora preciso dos dados do representante.",
-            },
-        ]
-        state = self.sm.process(
+    def test_after_nome_fantasia_asks_email(self):
+        """Após 3 campos, pede E-mail."""
+        history = _make_history(3)
+        state = determine_current_field(history, "contato@empresa.com")
+        assert state.current_field == OnboardingField.EMAIL
+
+    def test_after_email_asks_representante_name(self):
+        """Após 4 campos, pede nome do representante."""
+        history = _make_history(4)
+        state = determine_current_field(history, "João da Silva Santos")
+        assert state.current_field == OnboardingField.REPRESENTANTE_NAME
+
+    def test_after_name_asks_cpf(self):
+        """Após 5 campos, pede CPF do representante."""
+        history = _make_history(5)
+        state = determine_current_field(history, "123.456.789-00")
+        assert state.current_field == OnboardingField.REPRESENTANTE_CPF
+
+    def test_after_cpf_asks_phone(self):
+        """Após 6 campos, pede telefone."""
+        history = _make_history(6)
+        state = determine_current_field(history, "(11) 99999-8888")
+        assert state.current_field == OnboardingField.REPRESENTANTE_PHONE
+
+    def test_after_phone_asks_birth_date(self):
+        """Após 7 campos, pede data de nascimento."""
+        history = _make_history(7)
+        state = determine_current_field(history, "15/03/1990")
+        assert state.current_field == OnboardingField.REPRESENTANTE_BIRTH_DATE
+
+    def test_after_birth_date_asks_password(self):
+        """Após 8 campos, pede senha."""
+        history = _make_history(8)
+        state = determine_current_field(history, "123456")
+        assert state.current_field == OnboardingField.PASSWORD
+
+    def test_after_password_asks_confirmation(self):
+        """Após 9 campos, pede confirmação de senha."""
+        history = _make_history(9)
+        state = determine_current_field(history, "123456")
+        assert state.current_field == OnboardingField.PASSWORD_CONFIRMATION
+
+    def test_all_fields_done_returns_completed(self):
+        """Após 10 campos respondidos → COMPLETED."""
+        history = _make_history(10)
+        state = determine_current_field(history, "pronto")
+        assert state.current_field == OnboardingField.COMPLETED
+        assert state.is_complete is True
+
+    def test_collected_tracks_previous_fields(self):
+        """Campos coletados devem estar no dict 'collected'."""
+        history = _make_history(3)
+        state = determine_current_field(history, "contato@empresa.com")
+        assert OnboardingField.CNPJ.value in state.collected
+        assert OnboardingField.RAZAO_SOCIAL.value in state.collected
+        assert OnboardingField.NOME_FANTASIA.value in state.collected
+        assert state.collected[OnboardingField.CNPJ.value] == "12.345.678/0001-99"
+
+    def test_field_value_captures_current_query(self):
+        """field_value deve ser a query atual (valor cru do campo)."""
+        history = _make_history(2)
+        state = determine_current_field(history, "Minha Empresa Legal")
+        assert state.field_value == "Minha Empresa Legal"
+
+
+# =============================================================================
+# TestDetermineCurrentField — validation_error
+# =============================================================================
+
+class TestDetermineCurrentFieldValidationError:
+    """Testes de reenvio quando o BFA rejeita um campo."""
+
+    def test_validation_error_repeats_field(self):
+        """Se BFA enviou validation_error, repetir o campo rejeitado."""
+        history = _make_history(1)  # CNPJ já respondido
+        state = determine_current_field(
             history,
-            "Victor Campagnola, CPF: 123.456.789-00, Telefone: (11) 98765-4321, 19/02/1996",
+            "12345",
+            validation_error="CNPJ inválido: deve ter 14 dígitos",
         )
-        # Should have step 1 data from history + step 2 data from current query
-        assert "cnpj" in state.collected
-        assert "email" in state.collected
+        assert state.current_field == OnboardingField.CNPJ
+        assert state.has_validation_error is True
+        assert state.validation_error == "CNPJ inválido: deve ter 14 dígitos"
 
-    def test_step_3_password(self):
-        """Etapa 3 pede senha."""
-        history = [
-            {
-                "query": "CNPJ 12.345.678/0001-90, Razão Social ACME SOLUCOES EMPRESARIAIS LTDA, "
-                         "Nome Fantasia ACME Solucoes, E-mail contato@acmesolucoes.com.br",
-                "answer": "Agora preciso dos dados do representante.",
-            },
-            {
-                "query": "Victor Campagnola, CPF: 123.456.789-00, Telefone: (11) 98765-4321, 19/02/1996",
-                "answer": "Agora crie uma senha de 6 dígitos.",
-            },
-        ]
-        state = self.sm.process(history, "senha 123456")
-        assert "password" in state.collected
-        assert state.collected["password"] == "123456"
+    def test_validation_error_removes_from_collected(self):
+        """Campo rejeitado deve ser removido dos coletados."""
+        history = _make_history(2)  # CNPJ + Razão Social respondidos
+        state = determine_current_field(
+            history,
+            "AB",
+            validation_error="Razão Social: mínimo 3 caracteres",
+        )
+        assert state.current_field == OnboardingField.RAZAO_SOCIAL
+        assert OnboardingField.RAZAO_SOCIAL.value not in state.collected
+        # CNPJ ainda deve estar nos coletados
+        assert OnboardingField.CNPJ.value in state.collected
 
-    def test_step_4_password_confirmation_match(self):
-        """Confirmação de senha que bate deve completar o fluxo."""
-        history = [
-            {
-                "query": "CNPJ 12.345.678/0001-90, Razão Social ACME SOLUCOES EMPRESARIAIS LTDA, "
-                         "Nome Fantasia ACME Solucoes, E-mail contato@acmesolucoes.com.br",
-                "answer": "Agora preciso dos dados do representante.",
-            },
-            {
-                "query": "Victor Campagnola, CPF: 123.456.789-00, Telefone: (11) 98765-4321, 19/02/1996",
-                "answer": "Agora crie uma senha de 6 dígitos.",
-            },
-            {
-                "query": "senha 123456",
-                "answer": "Confirme a senha.",
-            },
-        ]
-        state = self.sm.process(history, "123456")
-        # passwordConfirmation needs to match — the extractor sees "123456" as password
-        # but in step 4, we expect passwordConfirmation
-        assert state.current_step >= 4
+    def test_validation_error_on_first_field(self):
+        """Erro no primeiro campo (CNPJ) deve repetir CNPJ."""
+        history = _make_history(1)  # CNPJ respondido (mas BFA rejeitou)
+        state = determine_current_field(
+            history,
+            "invalido",
+            validation_error="CNPJ inválido",
+        )
+        assert state.current_field == OnboardingField.CNPJ
+        assert state.has_validation_error is True
+        assert len(state.collected) == 0
 
-    def test_step_4_password_confirmation_mismatch(self):
-        """Confirmação de senha que não bate deve gerar erro."""
-        history = [
-            {
-                "query": "CNPJ 12.345.678/0001-90, Razão Social ACME SOLUCOES EMPRESARIAIS LTDA, "
-                         "Nome Fantasia ACME Solucoes, E-mail contato@acmesolucoes.com.br",
-                "answer": "Agora preciso dos dados do representante.",
-            },
-            {
-                "query": "Victor Campagnola, CPF: 123.456.789-00, Telefone: (11) 98765-4321, 19/02/1996",
-                "answer": "Agora crie uma senha de 6 dígitos.",
-            },
-            {
-                "query": "senha 123456",
-                "answer": "Confirme a senha.",
-            },
-        ]
-        state = self.sm.process(history, "654321")
-        # Should have error or not advance
-        assert state.current_step == 4
+    def test_validation_error_on_password(self):
+        """Erro na senha deve repetir PASSWORD."""
+        history = _make_history(9)  # 9 campos (password respondido)
+        state = determine_current_field(
+            history,
+            "abc",
+            validation_error="Senha deve ter 6 dígitos numéricos",
+        )
+        assert state.current_field == OnboardingField.PASSWORD
+        assert state.has_validation_error is True
+
+    def test_no_validation_error_advances(self):
+        """Sem validation_error, o fluxo avança normalmente."""
+        history = _make_history(1)  # CNPJ respondido
+        state = determine_current_field(history, "Empresa LTDA")
+        assert state.current_field == OnboardingField.RAZAO_SOCIAL
+        assert state.has_validation_error is False
 
 
 # =============================================================================
-# build_onboarding_context
+# TestBuildOnboardingContext — geração de instrução para o LLM
 # =============================================================================
 
 class TestBuildOnboardingContext:
-    def test_complete_context(self):
+    """Testes da função build_onboarding_context."""
+
+    def test_welcome_context(self):
+        """Welcome: gera instrução com prompt de boas-vindas."""
         state = OnboardingState(
-            current_step=5,
-            collected={
-                "cnpj": "12.345.678/0001-90",
-                "razaoSocial": "ACME LTDA",
-                "nomeFantasia": "ACME",
-                "email": "contato@acme.com",
-                "representanteName": "Victor",
-                "representanteCpf": "123.456.789-00",
-                "representantePhone": "(11) 98765-4321",
-                "representanteBirthDate": "19/02/1996",
-                "password": "123456",
-                "passwordConfirmation": "123456",
-            },
+            current_field=OnboardingField.WELCOME,
+            field_value="Quero abrir conta",
+        )
+        ctx = build_onboarding_context(state)
+        assert "[INSTRUÇÃO DE ONBOARDING" in ctx
+        assert "CNPJ" in ctx  # welcome prompt pede CNPJ
+        assert "search_knowledge_base" in ctx  # instrução de NÃO chamar
+
+    def test_normal_field_context(self):
+        """Campo normal: gera instrução pedindo somente aquele campo."""
+        state = OnboardingState(
+            current_field=OnboardingField.RAZAO_SOCIAL,
+            collected={OnboardingField.CNPJ.value: "12.345.678/0001-99"},
+            field_value="Empresa Teste LTDA",
+        )
+        ctx = build_onboarding_context(state)
+        assert "Razão Social" in ctx
+        assert "SOMENTE" in ctx
+
+    def test_validation_error_context(self):
+        """Erro de validação: gera instrução com erro e dica de formato."""
+        state = OnboardingState(
+            current_field=OnboardingField.CNPJ,
+            has_validation_error=True,
+            validation_error="CNPJ deve ter 14 dígitos",
+            field_value="123",
+        )
+        ctx = build_onboarding_context(state)
+        assert "rejeitado" in ctx.lower() or "⚠️" in ctx
+        assert "CNPJ deve ter 14 dígitos" in ctx
+        assert FIELD_FORMAT_HINTS[OnboardingField.CNPJ] in ctx
+
+    def test_completed_context(self):
+        """Completo: gera resumo sem a senha."""
+        collected = {
+            OnboardingField.CNPJ.value: "12.345.678/0001-99",
+            OnboardingField.RAZAO_SOCIAL.value: "Empresa Teste LTDA",
+            OnboardingField.NOME_FANTASIA.value: "Empresa Teste",
+            OnboardingField.EMAIL.value: "contato@empresa.com",
+            OnboardingField.REPRESENTANTE_NAME.value: "João da Silva",
+            OnboardingField.REPRESENTANTE_CPF.value: "123.456.789-00",
+            OnboardingField.REPRESENTANTE_PHONE.value: "(11) 99999-8888",
+            OnboardingField.REPRESENTANTE_BIRTH_DATE.value: "15/03/1990",
+            OnboardingField.PASSWORD.value: "123456",
+            OnboardingField.PASSWORD_CONFIRMATION.value: "123456",
+        }
+        state = OnboardingState(
+            current_field=OnboardingField.COMPLETED,
+            collected=collected,
             is_complete=True,
         )
         ctx = build_onboarding_context(state)
-        assert "ONBOARDING COMPLETO" in ctx
-        assert "12.345.678/0001-90" in ctx
-        assert "123456" not in ctx  # Senha não deve aparecer no resumo
+        assert "COMPLETO" in ctx or "✅" in ctx
+        assert "12.345.678/0001-99" in ctx  # CNPJ no resumo
+        assert "João da Silva" in ctx  # nome no resumo
+        assert "123456" not in ctx  # senha NÃO deve aparecer no resumo
 
-    def test_step_1_context_with_errors(self):
+    def test_completed_context_excludes_password_fields(self):
+        """No resumo final, PASSWORD e PASSWORD_CONFIRMATION não aparecem."""
+        collected = {f.value: f"valor_{f.value}" for f in DATA_FIELDS}
         state = OnboardingState(
-            current_step=1,
-            collected={},
-            errors=["CNPJ inválido: '12.345.678/1-90'. O CNPJ deve ter 14 dígitos."],
-            pending_fields=["cnpj", "razaoSocial", "nomeFantasia", "email"],
+            current_field=OnboardingField.COMPLETED,
+            collected=collected,
+            is_complete=True,
         )
         ctx = build_onboarding_context(state)
-        assert "Etapa 1" in ctx
-        assert "CNPJ inválido" in ctx
-        assert "INFORME AO CLIENTE" in ctx
-        assert "NÃO avance" in ctx
+        # Deve ter os labels de dados (CNPJ, Razão Social, etc.)
+        assert "CNPJ" in ctx
+        assert "E-mail" in ctx
+        # Mas não as senhas
+        assert "valor_password" not in ctx
+        assert "valor_passwordConfirmation" not in ctx
 
-    def test_step_2_context_with_pending(self):
-        state = OnboardingState(
-            current_step=2,
-            collected={
-                "cnpj": "12.345.678/0001-90",
-                "razaoSocial": "ACME LTDA",
-                "nomeFantasia": "ACME",
-                "email": "contato@acme.com",
-            },
-            pending_fields=["representanteName", "representanteCpf",
-                           "representantePhone", "representanteBirthDate"],
-        )
-        ctx = build_onboarding_context(state)
-        assert "Etapa 2" in ctx
-        assert "PEÇA AO CLIENTE" in ctx
-        assert "12.345.678/0001-90" in ctx  # Dados já coletados
+    def test_context_always_has_no_search_instruction(self):
+        """Toda instrução deve dizer para NÃO chamar search_knowledge_base."""
+        for field in [OnboardingField.WELCOME, OnboardingField.CNPJ, OnboardingField.EMAIL]:
+            state = OnboardingState(
+                current_field=field,
+                field_value="qualquer",
+            )
+            ctx = build_onboarding_context(state)
+            assert "search_knowledge_base" in ctx
 
 
 # =============================================================================
-# is_onboarding_intent
+# TestIsOnboardingIntent — detecção de intenção
 # =============================================================================
 
 class TestIsOnboardingIntent:
-    def test_direct_intent(self):
-        assert is_onboarding_intent("quero abrir conta", []) is True
+    """Testes da função is_onboarding_intent."""
 
-    def test_intent_from_history(self):
+    @pytest.mark.parametrize("query", [
+        "Quero abrir conta",
+        "Preciso abrir uma conta PJ",
+        "Abertura de conta",
+        "Criar conta",
+        "quero abrir minha conta",
+    ])
+    def test_detects_opening_queries(self, query):
+        """Queries sobre abertura devem ser detectadas."""
+        assert is_onboarding_intent(query, []) is True
+
+    @pytest.mark.parametrize("query", [
+        "Qual meu saldo?",
+        "Oi, tudo bem?",
+        "Preciso de ajuda com PIX",
+        "Bom dia",
+    ])
+    def test_ignores_non_opening_queries(self, query):
+        """Queries que não são sobre abertura não devem ativar onboarding."""
+        assert is_onboarding_intent(query, []) is False
+
+    def test_detects_from_history(self):
+        """Se o histórico já contém contexto de onboarding, retorna True."""
         history = [
-            {"query": "quero abrir conta", "answer": "Vou te ajudar!"},
+            {"query": "Quero abrir conta", "answer": "Vamos abrir sua conta PJ!"},
         ]
-        assert is_onboarding_intent("12.345.678/0001-90", history) is True
+        assert is_onboarding_intent("12.345.678/0001-99", history) is True
 
-    def test_no_intent(self):
-        assert is_onboarding_intent("qual meu saldo?", []) is False
-
-    def test_intent_with_keyword_variations(self):
-        assert is_onboarding_intent("quero criar conta", []) is True
-        assert is_onboarding_intent("nova conta pj", []) is True
-
-    def test_history_with_cnpj_reference(self):
+    def test_detects_cnpj_in_history(self):
+        """Se histórico menciona CNPJ, é onboarding."""
         history = [
-            {"query": "quero conta", "answer": "Me envie o CNPJ."},
+            {"query": "Meu CNPJ é 12.345.678/0001-99", "answer": "CNPJ recebido!"},
         ]
-        assert is_onboarding_intent("12345678000190", history) is True
+        assert is_onboarding_intent("Empresa LTDA", history) is True
+
+    def test_detects_representante_in_history(self):
+        """Se histórico menciona representante, é onboarding."""
+        history = [
+            {"query": "dados", "answer": "Agora preciso do representante legal"},
+        ]
+        assert is_onboarding_intent("João Silva", history) is True
+
+    def test_empty_history_and_neutral_query(self):
+        """Sem histórico e query neutra → não é onboarding."""
+        assert is_onboarding_intent("Bom dia", []) is False
+
+
+# =============================================================================
+# TestOnboardingState — dataclass
+# =============================================================================
+
+class TestOnboardingState:
+    """Testes do dataclass OnboardingState."""
+
+    def test_defaults(self):
+        """Defaults devem ser seguros."""
+        state = OnboardingState(current_field=OnboardingField.CNPJ)
+        assert state.collected == {}
+        assert state.is_complete is False
+        assert state.has_validation_error is False
+        assert state.validation_error == ""
+        assert state.field_value == ""
+
+    def test_with_all_fields(self):
+        """Deve aceitar todos os campos."""
+        state = OnboardingState(
+            current_field=OnboardingField.EMAIL,
+            collected={"cnpj": "12345678000199"},
+            is_complete=False,
+            has_validation_error=True,
+            validation_error="Email inválido",
+            field_value="invalido",
+        )
+        assert state.current_field == OnboardingField.EMAIL
+        assert state.has_validation_error is True
+        assert state.validation_error == "Email inválido"
+
+
+# =============================================================================
+# TestFieldSequenceIntegration — fluxo completo campo a campo
+# =============================================================================
+
+class TestFieldSequenceIntegration:
+    """Testa o fluxo completo: simula todos os 10 campos sendo respondidos."""
+
+    def test_full_flow(self):
+        """Percorre todos os campos de WELCOME até COMPLETED."""
+        field_values = [
+            "12.345.678/0001-99",
+            "Empresa Teste LTDA",
+            "Empresa Teste",
+            "contato@empresa.com",
+            "João da Silva Santos",
+            "123.456.789-00",
+            "(11) 99999-8888",
+            "15/03/1990",
+            "123456",
+            "123456",
+        ]
+
+        # 1. Welcome
+        state = determine_current_field([], "Quero abrir conta")
+        assert state.current_field == OnboardingField.WELCOME
+
+        history = [{"query": "Quero abrir conta", "answer": "Vamos lá!"}]
+
+        # 2-11. Um campo por vez
+        for i, value in enumerate(field_values):
+            state = determine_current_field(history, value)
+            expected_field = DATA_FIELDS[i]
+            assert state.current_field == expected_field, (
+                f"Turn {i + 1}: expected {expected_field.value}, "
+                f"got {state.current_field.value}"
+            )
+            assert state.field_value == value
+            history.append({"query": value, "answer": f"Recebido {i + 1}!"})
+
+        # 12. Completed
+        state = determine_current_field(history, "pronto")
+        assert state.current_field == OnboardingField.COMPLETED
+        assert state.is_complete is True
+        assert len(state.collected) == 10
+
+    def test_flow_with_validation_error_retry(self):
+        """Fluxo com um erro de validação no CNPJ: deve repetir."""
+        # Welcome
+        history = [{"query": "Quero abrir conta", "answer": "Vamos lá!"}]
+
+        # CNPJ com valor inválido
+        state = determine_current_field(history, "123")
+        assert state.current_field == OnboardingField.CNPJ
+        history.append({"query": "123", "answer": "CNPJ recebido!"})
+
+        # BFA rejeita → validation_error → deve repetir CNPJ
+        state = determine_current_field(
+            history,
+            "12.345.678/0001-99",
+            validation_error="CNPJ inválido",
+        )
+        assert state.current_field == OnboardingField.CNPJ
+        assert state.has_validation_error is True
+
+    def test_completed_state_has_all_data(self):
+        """No estado COMPLETED, collected deve ter os 10 campos."""
+        history = _make_history(10)
+        state = determine_current_field(history, "finalizar")
+        assert state.is_complete is True
+        # Os 10 campos devem estar nos coletados
+        for field in DATA_FIELDS:
+            assert field.value in state.collected, (
+                f"{field.value} missing from collected"
+            )

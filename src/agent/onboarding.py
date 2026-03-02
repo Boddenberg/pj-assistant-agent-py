@@ -1,28 +1,35 @@
 """
-Onboarding — validação determinística e máquina de estados.
+Onboarding — fluxo conversacional campo-a-campo.
 
-Por que NÃO confiar no LLM para validar dados e controlar fluxo?
-  - LLM é probabilístico: pode "esquecer" passos ou pular etapas
-  - Validação de CNPJ/CPF/email precisa ser determinística (regex)
-  - Controle de fluxo precisa ser rígido (etapa 1 → 2 → 3 → 4)
-  - LLM é bom para CONVERSAR, não para seguir regras de negócio
+Arquitetura v8:
+  O agente Python é a CAMADA CONVERSACIONAL.
+  O BFA (Go) é a CAMADA DE NEGÓCIO.
 
-Arquitetura:
-  1. OnboardingValidator — validação de formato (regex, regras)
-  2. OnboardingStateMachine — detecta etapa atual pelo histórico
-  3. build_onboarding_context() — gera instruções determinísticas pro LLM
+  Responsabilidades do agente:
+    - Interpretar linguagem natural (IA)
+    - Saber qual campo pedir agora (state machine simples)
+    - Gerar mensagens amigáveis (templates + IA para ambiguidade)
+    - Devolver o campo + valor cru na resposta para o BFA validar
 
-O runner chama build_onboarding_context() antes de invocar o grafo.
-O LLM recebe a etapa atual + dados validados + próximos campos a pedir.
-Assim o LLM só precisa ser conversacional — a lógica está em Python.
+  Responsabilidades do BFA (Go):
+    - Validar formato (CNPJ 14 dígitos, CPF 11 dígitos, email com @, etc.)
+    - Validar regra de negócio (CNPJ único, representante 18+, dígito verificador)
+    - Persistir dados
+    - Retornar erro estruturado se inválido
+    - Reenviar a mensagem com validation_error para o agente pedir correção
+
+  O agente NUNCA valida formato. O cliente manda "12345", o agente
+  devolve { current_field: "cnpj", field_value: "12345" } e o BFA decide.
+
+Fluxo campo-a-campo:
+  O agente pede UM campo por vez. O cliente responde. O agente identifica
+  qual campo está sendo respondido e avança. Sem ambiguidade.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
-from datetime import datetime
-from enum import IntEnum
+from enum import Enum
 
 from src.observability.logging import get_logger
 
@@ -30,585 +37,303 @@ logger = get_logger("onboarding")
 
 
 # =============================================================================
-# Constantes
+# Definição dos campos do onboarding (sequência fixa)
 # =============================================================================
 
-class OnboardingStep(IntEnum):
-    """Etapas do onboarding — ordem é obrigatória."""
-    STEP_1_COMPANY = 1      # CNPJ, Razão Social, Nome Fantasia, E-mail
-    STEP_2_REPRESENTATIVE = 2  # Nome, CPF, Telefone, Data de nascimento
-    STEP_3_PASSWORD = 3      # Senha numérica de 6 dígitos
-    STEP_4_CONFIRM = 4       # Confirmação da senha
-    COMPLETED = 5            # Fluxo concluído
+class OnboardingField(str, Enum):
+    """Campos do onboarding na ordem em que serão pedidos."""
+    WELCOME = "welcome"
+    CNPJ = "cnpj"
+    RAZAO_SOCIAL = "razaoSocial"
+    NOME_FANTASIA = "nomeFantasia"
+    EMAIL = "email"
+    REPRESENTANTE_NAME = "representanteName"
+    REPRESENTANTE_CPF = "representanteCpf"
+    REPRESENTANTE_PHONE = "representantePhone"
+    REPRESENTANTE_BIRTH_DATE = "representanteBirthDate"
+    PASSWORD = "password"
+    PASSWORD_CONFIRMATION = "passwordConfirmation"
+    COMPLETED = "completed"
 
 
-# Campos por etapa
-STEP_FIELDS: dict[int, list[str]] = {
-    1: ["cnpj", "razaoSocial", "nomeFantasia", "email"],
-    2: ["representanteName", "representanteCpf", "representantePhone", "representanteBirthDate"],
-    3: ["password"],
-    4: ["passwordConfirmation"],
+# Sequência ordenada — a ordem em que os campos serão pedidos
+FIELD_SEQUENCE: list[OnboardingField] = [
+    OnboardingField.WELCOME,
+    OnboardingField.CNPJ,
+    OnboardingField.RAZAO_SOCIAL,
+    OnboardingField.NOME_FANTASIA,
+    OnboardingField.EMAIL,
+    OnboardingField.REPRESENTANTE_NAME,
+    OnboardingField.REPRESENTANTE_CPF,
+    OnboardingField.REPRESENTANTE_PHONE,
+    OnboardingField.REPRESENTANTE_BIRTH_DATE,
+    OnboardingField.PASSWORD,
+    OnboardingField.PASSWORD_CONFIRMATION,
+    OnboardingField.COMPLETED,
+]
+
+# Apenas campos de dados (sem welcome e completed)
+DATA_FIELDS: list[OnboardingField] = [
+    f for f in FIELD_SEQUENCE
+    if f not in (OnboardingField.WELCOME, OnboardingField.COMPLETED)
+]
+
+# Mensagens template — o que o agente diz ao pedir cada campo
+FIELD_PROMPTS: dict[OnboardingField, str] = {
+    OnboardingField.WELCOME: (
+        "Que ótimo que quer abrir sua conta PJ! 😊\n"
+        "Vou te guiar passo a passo. São dados simples e leva poucos minutos.\n\n"
+        "Para começar, me informe o **CNPJ** da empresa.\n"
+        "Formato: XX.XXX.XXX/XXXX-XX"
+    ),
+    OnboardingField.CNPJ: (
+        "Me informe o **CNPJ** da empresa.\n"
+        "Formato: XX.XXX.XXX/XXXX-XX"
+    ),
+    OnboardingField.RAZAO_SOCIAL: (
+        "CNPJ recebido! ✅\n\n"
+        "Agora me diga a **Razão Social** da empresa (nome oficial no contrato social)."
+    ),
+    OnboardingField.NOME_FANTASIA: (
+        "Razão Social recebida! ✅\n\n"
+        "Qual o **Nome Fantasia** da empresa? (nome comercial, como os clientes conhecem)"
+    ),
+    OnboardingField.EMAIL: (
+        "Nome Fantasia recebido! ✅\n\n"
+        "Informe o **e-mail** corporativo para contato.\n"
+        "Exemplo: contato@suaempresa.com.br"
+    ),
+    OnboardingField.REPRESENTANTE_NAME: (
+        "E-mail recebido! ✅ Dados da empresa completos!\n\n"
+        "Agora preciso dos dados do **representante legal**.\n"
+        "Qual o **nome completo** do representante?"
+    ),
+    OnboardingField.REPRESENTANTE_CPF: (
+        "Nome recebido! ✅\n\n"
+        "Informe o **CPF** do representante.\n"
+        "Formato: XXX.XXX.XXX-XX"
+    ),
+    OnboardingField.REPRESENTANTE_PHONE: (
+        "CPF recebido! ✅\n\n"
+        "Qual o **telefone** do representante?\n"
+        "Formato: (XX) XXXXX-XXXX"
+    ),
+    OnboardingField.REPRESENTANTE_BIRTH_DATE: (
+        "Telefone recebido! ✅\n\n"
+        "Qual a **data de nascimento** do representante?\n"
+        "Formato: DD/MM/AAAA"
+    ),
+    OnboardingField.PASSWORD: (
+        "Data de nascimento recebida! ✅ Dados do representante completos!\n\n"
+        "Quase lá! 🔒\n"
+        "Crie uma **senha numérica de 6 dígitos** para acesso à conta."
+    ),
+    OnboardingField.PASSWORD_CONFIRMATION: (
+        "Senha recebida! ✅\n\n"
+        "Por segurança, **digite a senha novamente** para confirmar."
+    ),
 }
 
-# Labels amigáveis para cada campo (português)
-FIELD_LABELS: dict[str, str] = {
-    "cnpj": "CNPJ",
-    "razaoSocial": "Razão Social",
-    "nomeFantasia": "Nome Fantasia",
-    "email": "E-mail",
-    "representanteName": "Nome do representante",
-    "representanteCpf": "CPF do representante",
-    "representantePhone": "Telefone",
-    "representanteBirthDate": "Data de nascimento",
-    "password": "Senha (6 dígitos numéricos)",
-    "passwordConfirmation": "Confirmação da senha",
+# Labels para o resumo final
+FIELD_LABELS: dict[OnboardingField, str] = {
+    OnboardingField.CNPJ: "CNPJ",
+    OnboardingField.RAZAO_SOCIAL: "Razão Social",
+    OnboardingField.NOME_FANTASIA: "Nome Fantasia",
+    OnboardingField.EMAIL: "E-mail",
+    OnboardingField.REPRESENTANTE_NAME: "Representante",
+    OnboardingField.REPRESENTANTE_CPF: "CPF do representante",
+    OnboardingField.REPRESENTANTE_PHONE: "Telefone",
+    OnboardingField.REPRESENTANTE_BIRTH_DATE: "Data de nascimento",
 }
 
-
-# =============================================================================
-# Validador — regras determinísticas de formato
-# =============================================================================
-
-@dataclass
-class ValidationResult:
-    """Resultado de uma validação de campo."""
-    valid: bool
-    value: str = ""           # Valor limpo/normalizado
-    error: str = ""           # Mensagem de erro (se inválido)
-
-
-class OnboardingValidator:
-    """
-    Validador determinístico de campos do onboarding.
-
-    Cada método retorna ValidationResult com:
-      - valid: se passou na validação
-      - value: valor normalizado (CNPJ sem pontos, etc.)
-      - error: mensagem de erro legível para o cliente
-    """
-
-    @staticmethod
-    def validate_cnpj(raw: str) -> ValidationResult:
-        """Valida CNPJ: 14 dígitos numéricos."""
-        digits = re.sub(r"\D", "", raw)
-        if len(digits) != 14:
-            return ValidationResult(
-                valid=False,
-                error=f"CNPJ inválido: '{raw}'. O CNPJ deve ter 14 dígitos (ex: 12.345.678/0001-90).",
-            )
-        formatted = f"{digits[:2]}.{digits[2:5]}.{digits[5:8]}/{digits[8:12]}-{digits[12:]}"
-        return ValidationResult(valid=True, value=formatted)
-
-    @staticmethod
-    def validate_cpf(raw: str) -> ValidationResult:
-        """Valida CPF: 11 dígitos numéricos."""
-        digits = re.sub(r"\D", "", raw)
-        if len(digits) != 11:
-            return ValidationResult(
-                valid=False,
-                error=f"CPF inválido: '{raw}'. O CPF deve ter 11 dígitos (ex: 123.456.789-00).",
-            )
-        formatted = f"{digits[:3]}.{digits[3:6]}.{digits[6:9]}-{digits[9:]}"
-        return ValidationResult(valid=True, value=formatted)
-
-    @staticmethod
-    def validate_email(raw: str) -> ValidationResult:
-        """Valida e-mail: deve conter @ e domínio."""
-        email = raw.strip()
-        pattern = r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$"
-        if not re.match(pattern, email):
-            return ValidationResult(
-                valid=False,
-                error=f"E-mail inválido: '{raw}'. Deve conter @ e um domínio válido (ex: empresa@email.com).",
-            )
-        return ValidationResult(valid=True, value=email)
-
-    @staticmethod
-    def validate_razao_social(raw: str) -> ValidationResult:
-        """Valida Razão Social: mínimo 3 caracteres."""
-        value = raw.strip()
-        if len(value) < 3:
-            return ValidationResult(
-                valid=False,
-                error=f"Razão Social muito curta: '{raw}'. Mínimo 3 caracteres.",
-            )
-        return ValidationResult(valid=True, value=value)
-
-    @staticmethod
-    def validate_nome_fantasia(raw: str) -> ValidationResult:
-        """Valida Nome Fantasia: mínimo 2 caracteres."""
-        value = raw.strip()
-        if len(value) < 2:
-            return ValidationResult(
-                valid=False,
-                error=f"Nome Fantasia muito curto: '{raw}'. Mínimo 2 caracteres.",
-            )
-        return ValidationResult(valid=True, value=value)
-
-    @staticmethod
-    def validate_representante_name(raw: str) -> ValidationResult:
-        """Valida nome do representante: mínimo 5 caracteres."""
-        value = raw.strip()
-        if len(value) < 5:
-            return ValidationResult(
-                valid=False,
-                error=f"Nome do representante muito curto: '{raw}'. Mínimo 5 caracteres (nome completo).",
-            )
-        return ValidationResult(valid=True, value=value)
-
-    @staticmethod
-    def validate_phone(raw: str) -> ValidationResult:
-        """Valida telefone: (XX) XXXXX-XXXX ou (XX) XXXX-XXXX."""
-        digits = re.sub(r"\D", "", raw)
-        if len(digits) < 10 or len(digits) > 11:
-            return ValidationResult(
-                valid=False,
-                error=f"Telefone inválido: '{raw}'. Use o formato (XX) XXXXX-XXXX (10 ou 11 dígitos).",
-            )
-        if len(digits) == 11:
-            formatted = f"({digits[:2]}) {digits[2:7]}-{digits[7:]}"
-        else:
-            formatted = f"({digits[:2]}) {digits[2:6]}-{digits[6:]}"
-        return ValidationResult(valid=True, value=formatted)
-
-    @staticmethod
-    def validate_birth_date(raw: str) -> ValidationResult:
-        """Valida data de nascimento: DD/MM/AAAA, 18+ anos."""
-        value = raw.strip()
-        # Tentar parsear DD/MM/AAAA
-        match = re.match(r"^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$", value)
-        if not match:
-            return ValidationResult(
-                valid=False,
-                error=f"Data inválida: '{raw}'. Use o formato DD/MM/AAAA (ex: 19/02/1996).",
-            )
-        day, month, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
-        try:
-            birth = datetime(year, month, day)
-        except ValueError:
-            return ValidationResult(
-                valid=False,
-                error=f"Data inválida: '{raw}'. Verifique dia/mês/ano.",
-            )
-        today = datetime.now()
-        age = today.year - birth.year - ((today.month, today.day) < (birth.month, birth.day))
-        if age < 18:
-            return ValidationResult(
-                valid=False,
-                error=f"O representante deve ter 18 anos ou mais. Data informada: {value}.",
-            )
-        formatted = f"{day:02d}/{month:02d}/{year}"
-        return ValidationResult(valid=True, value=formatted)
-
-    @staticmethod
-    def validate_password(raw: str) -> ValidationResult:
-        """Valida senha: exatamente 6 dígitos numéricos."""
-        value = raw.strip()
-        if not re.match(r"^\d{6}$", value):
-            return ValidationResult(
-                valid=False,
-                error="Senha inválida. A senha deve ter exatamente 6 dígitos numéricos (ex: 123456).",
-            )
-        return ValidationResult(valid=True, value=value)
-
-    @staticmethod
-    def validate_password_confirmation(raw: str, password: str) -> ValidationResult:
-        """Valida confirmação de senha: deve ser idêntica à senha."""
-        value = raw.strip()
-        if value != password:
-            return ValidationResult(
-                valid=False,
-                error="As senhas não coincidem. Por favor, digite a mesma senha de 6 dígitos.",
-            )
-        return ValidationResult(valid=True, value=value)
-
-
-# Mapeamento campo → método de validação
-_VALIDATORS: dict[str, str] = {
-    "cnpj": "validate_cnpj",
-    "razaoSocial": "validate_razao_social",
-    "nomeFantasia": "validate_nome_fantasia",
-    "email": "validate_email",
-    "representanteName": "validate_representante_name",
-    "representanteCpf": "validate_cpf",
-    "representantePhone": "validate_phone",
-    "representanteBirthDate": "validate_birth_date",
-    "password": "validate_password",
+# Dicas de formato por campo (fallback se o BFA não retornar mensagem)
+FIELD_FORMAT_HINTS: dict[OnboardingField, str] = {
+    OnboardingField.CNPJ: "Formato: XX.XXX.XXX/XXXX-XX (14 dígitos)",
+    OnboardingField.RAZAO_SOCIAL: "Mínimo 3 caracteres",
+    OnboardingField.NOME_FANTASIA: "Mínimo 2 caracteres",
+    OnboardingField.EMAIL: "Exemplo: contato@empresa.com",
+    OnboardingField.REPRESENTANTE_NAME: "Nome completo (mínimo 5 caracteres)",
+    OnboardingField.REPRESENTANTE_CPF: "Formato: XXX.XXX.XXX-XX (11 dígitos)",
+    OnboardingField.REPRESENTANTE_PHONE: "Formato: (XX) XXXXX-XXXX",
+    OnboardingField.REPRESENTANTE_BIRTH_DATE: "Formato: DD/MM/AAAA",
+    OnboardingField.PASSWORD: "Exatamente 6 dígitos numéricos",
+    OnboardingField.PASSWORD_CONFIRMATION: "Mesma senha de 6 dígitos",
 }
 
 
 # =============================================================================
-# Extrator — tenta extrair dados da mensagem do cliente
-# =============================================================================
-
-class OnboardingExtractor:
-    """
-    Extrai dados de onboarding de uma mensagem de texto livre.
-
-    Usa regex patterns para encontrar CNPJ, CPF, e-mail, telefone, etc.
-    em texto não estruturado. Retorna dict com campos encontrados.
-    """
-
-    @staticmethod
-    def extract_from_message(text: str) -> dict[str, str]:
-        """Extrai campos identificáveis da mensagem do cliente."""
-        found: dict[str, str] = {}
-
-        # CNPJ: XX.XXX.XXX/XXXX-XX ou 14 dígitos seguidos
-        cnpj_match = re.search(r"\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}", text)
-        if cnpj_match:
-            found["cnpj"] = cnpj_match.group()
-        else:
-            # Fallback: se o texto menciona "CNPJ", capturar o que vem depois
-            # para permitir validação de formato inválido (gerar erro)
-            cnpj_fallback = re.search(
-                r"cnpj[:\s]+([0-9./\-]+)", text, re.IGNORECASE,
-            )
-            if cnpj_fallback:
-                found["cnpj"] = cnpj_fallback.group(1).strip(", ")
-
-        # CPF: XXX.XXX.XXX-XX ou 11 dígitos seguidos (mas não dentro de CNPJ)
-        # Procurar CPF depois de remover o CNPJ do texto para evitar falso positivo
-        text_no_cnpj = text
-        if cnpj_match:
-            text_no_cnpj = text[:cnpj_match.start()] + text[cnpj_match.end():]
-        cpf_match = re.search(r"\d{3}\.?\d{3}\.?\d{3}-?\d{2}", text_no_cnpj)
-        if cpf_match:
-            found["representanteCpf"] = cpf_match.group()
-
-        # E-mail
-        email_match = re.search(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", text)
-        if email_match:
-            found["email"] = email_match.group()
-        else:
-            # Fallback: se o texto menciona "email"/"e-mail", capturar o valor
-            # para permitir validação de formato inválido (gerar erro)
-            email_fallback = re.search(
-                r"e-?mail[:\s]+([^\s,]+)", text, re.IGNORECASE,
-            )
-            if email_fallback:
-                found["email"] = email_fallback.group(1).strip(", ")
-
-        # Telefone: (XX) XXXXX-XXXX ou variações
-        phone_match = re.search(r"\(?\d{2}\)?\s*\d{4,5}-?\d{4}", text)
-        if phone_match:
-            found["representantePhone"] = phone_match.group()
-
-        # Data de nascimento: DD/MM/AAAA
-        date_match = re.search(r"\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4}", text)
-        if date_match:
-            found["representanteBirthDate"] = date_match.group()
-
-        # Senha: 6 dígitos isolados (não parte de outro número)
-        # Só procurar se a mensagem for curta ou explicitamente mencionou "senha"
-        if re.search(r"senha", text, re.IGNORECASE) or len(text.strip()) <= 10:
-            pwd_match = re.search(r"\b(\d{6})\b", text)
-            if pwd_match:
-                # Verificar se não é parte de CNPJ, CPF ou telefone
-                pwd_val = pwd_match.group(1)
-                is_part_of_other = False
-                for key in ["cnpj", "representanteCpf", "representantePhone"]:
-                    if key in found and pwd_val in re.sub(r"\D", "", found[key]):
-                        is_part_of_other = True
-                        break
-                if not is_part_of_other:
-                    found["password"] = pwd_val
-
-        # Razão Social: após "razão social" ou "razao social"
-        rs_match = re.search(
-            r"raz[ãa]o\s+social[:\s]+([^,\n]+?)(?:,\s*(?:nome|e-?mail|cnpj)|$)",
-            text, re.IGNORECASE,
-        )
-        if rs_match:
-            found["razaoSocial"] = rs_match.group(1).strip()
-
-        # Nome Fantasia: após "nome fantasia"
-        nf_match = re.search(
-            r"nome\s+fantasia[:\s]+([^,\n]+?)(?:,\s*(?:raz[ãa]o|e-?mail|cnpj)|$)",
-            text, re.IGNORECASE,
-        )
-        if nf_match:
-            found["nomeFantasia"] = nf_match.group(1).strip()
-
-        # Nome do representante: text que vem antes do CPF, ou após "nome"
-        # Heurística: nome completo é texto com letras antes do CPF
-        name_match = re.search(
-            r"(?:^|nome[:\s]+)([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]{3,}?)(?:,|\s*CPF|\s*cpf|\s*\d{3}\.)",
-            text, re.IGNORECASE,
-        )
-        if name_match:
-            candidate = name_match.group(1).strip()
-            # Não pegar "Razão Social" ou "Nome Fantasia" como nome do representante
-            if not re.search(r"raz[ãa]o|fantasia|social", candidate, re.IGNORECASE):
-                found["representanteName"] = candidate
-
-        return found
-
-
-# =============================================================================
-# State Machine — controla o fluxo de onboarding
+# State Machine — determina o campo atual pelo histórico
 # =============================================================================
 
 @dataclass
 class OnboardingState:
-    """Estado completo do onboarding extraído do histórico."""
-    current_step: int = 1
-    collected: dict[str, str] = field(default_factory=dict)  # campo → valor validado
-    errors: list[str] = field(default_factory=list)           # erros da mensagem atual
-    pending_fields: list[str] = field(default_factory=list)   # campos faltando na etapa atual
+    """Estado do onboarding derivado do histórico."""
+    current_field: OnboardingField
+    collected: dict[str, str] = field(default_factory=dict)
     is_complete: bool = False
+    has_validation_error: bool = False
+    validation_error: str = ""
+    field_value: str = ""  # valor cru que o cliente enviou para o campo atual
 
 
-class OnboardingStateMachine:
+def determine_current_field(
+    history: list[dict[str, str]],
+    current_query: str,
+    validation_error: str = "",
+) -> OnboardingState:
     """
-    Máquina de estados do onboarding.
+    Analisa o histórico para determinar em qual campo estamos.
 
-    Analisa o histórico de conversa para reconstruir o estado:
-      1. Percorre cada turno (query + answer)
-      2. Extrai dados de cada mensagem do cliente
-      3. Valida cada dado extraído
-      4. Determina a etapa atual
+    Lógica:
+      - Turno 0 no histórico: cliente pediu abertura → agente deu welcome
+      - A partir do turno 1: cada turno = cliente respondeu um campo
+      - Se validation_error != "": o BFA rejeitou o último campo → repetir
+      - A query atual é o valor do campo que está sendo respondido agora
 
-    Depois processa a mensagem ATUAL do cliente:
-      1. Extrai novos dados
-      2. Valida
-      3. Retorna o estado atualizado com erros e campos pendentes
+    Args:
+        history: Turnos anteriores [{"query": "...", "answer": "..."}]
+        current_query: Mensagem atual do cliente (valor do campo)
+        validation_error: Erro do BFA se o último campo foi rejeitado
+
+    Returns:
+        OnboardingState com campo atual, valor e dados coletados.
     """
+    collected: dict[str, str] = {}
 
-    def __init__(self) -> None:
-        self.validator = OnboardingValidator()
-        self.extractor = OnboardingExtractor()
+    if not history:
+        # Primeira mensagem — welcome + pedir CNPJ
+        return OnboardingState(
+            current_field=OnboardingField.WELCOME,
+            field_value=current_query,
+        )
 
-    def _validate_field(
-        self, field_name: str, raw_value: str, collected: dict[str, str],
-    ) -> ValidationResult:
-        """Valida um campo usando o validador adequado."""
-        if field_name == "passwordConfirmation":
-            password = collected.get("password", "")
-            return self.validator.validate_password_confirmation(raw_value, password)
+    # Contar turnos de dados (a partir do turno 1).
+    # Turno 0 = cliente pediu abertura (não é dado).
+    # Turno 1 = cliente respondeu CNPJ.
+    # Turno 2 = cliente respondeu Razão Social.
+    # ...
+    data_turns = len(history) - 1  # descontar turno 0 (abertura)
 
-        method_name = _VALIDATORS.get(field_name)
-        if not method_name:
-            return ValidationResult(valid=False, error=f"Campo desconhecido: {field_name}")
+    # Coletar dados dos turnos anteriores
+    for i in range(data_turns):
+        if i < len(DATA_FIELDS):
+            field_enum = DATA_FIELDS[i]
+            turn = history[i + 1]  # +1 porque turno 0 é abertura
+            collected[field_enum.value] = turn["query"]
 
-        method = getattr(self.validator, method_name)
-        return method(raw_value)
-
-    def _determine_step(self, collected: dict[str, str]) -> int:
-        """Determina a etapa atual com base nos dados coletados."""
-        # Etapa 1 completa?
-        step1_fields = STEP_FIELDS[1]
-        if not all(f in collected for f in step1_fields):
-            return 1
-
-        # Etapa 2 completa?
-        step2_fields = STEP_FIELDS[2]
-        if not all(f in collected for f in step2_fields):
-            return 2
-
-        # Etapa 3 completa?
-        if "password" not in collected:
-            return 3
-
-        # Etapa 4 completa?
-        if "passwordConfirmation" not in collected:
-            return 4
-
-        return 5  # Completo
-
-    def _extract_and_validate(
-        self, text: str, current_step: int, collected: dict[str, str],
-    ) -> tuple[dict[str, str], list[str]]:
-        """
-        Extrai dados do texto e valida os que pertencem à etapa atual.
-        Retorna (novos campos validados, erros).
-        """
-        extracted = self.extractor.extract_from_message(text)
-        new_collected: dict[str, str] = {}
-        errors: list[str] = []
-
-        # Campos da etapa atual
-        current_fields = STEP_FIELDS.get(current_step, [])
-
-        for field_name in current_fields:
-            if field_name in collected:
-                continue  # Já coletado
-
-            raw = extracted.get(field_name)
-            if raw is None:
-                continue  # Não encontrado nesta mensagem
-
-            result = self._validate_field(field_name, raw, collected)
-            if result.valid:
-                new_collected[field_name] = result.value
-            else:
-                errors.append(result.error)
-
-        return new_collected, errors
-
-    def process(
-        self,
-        history: list[dict[str, str]],
-        current_query: str,
-    ) -> OnboardingState:
-        """
-        Processa o histórico completo + mensagem atual.
-
-        Args:
-            history: Lista de turnos [{"query": "...", "answer": "..."}]
-            current_query: Mensagem atual do cliente
-
-        Returns:
-            OnboardingState com etapa atual, dados coletados, erros e campos pendentes.
-        """
-        collected: dict[str, str] = {}
-
-        # 1. Reconstruir estado a partir do histórico
-        for turn in history:
-            step = self._determine_step(collected)
-            new_data, _ = self._extract_and_validate(
-                turn["query"], step, collected,
+    # Se o BFA rejeitou o último campo, repetir
+    if validation_error:
+        if data_turns > 0 and data_turns <= len(DATA_FIELDS):
+            # O último campo foi rejeitado — remover dos coletados
+            rejected_field = DATA_FIELDS[data_turns - 1]
+            collected.pop(rejected_field.value, None)
+            return OnboardingState(
+                current_field=rejected_field,
+                collected=collected,
+                has_validation_error=True,
+                validation_error=validation_error,
+                field_value=current_query,
             )
-            collected.update(new_data)
 
-            # Recalcular step após coletar dados
-            step = self._determine_step(collected)
-
-        # 2. Processar mensagem atual
-        current_step = self._determine_step(collected)
-        new_data, errors = self._extract_and_validate(
-            current_query, current_step, collected,
-        )
-        collected.update(new_data)
-
-        # 3. Recalcular etapa final e campos pendentes
-        final_step = self._determine_step(collected)
-        pending = [
-            f for f in STEP_FIELDS.get(final_step, [])
-            if f not in collected
-        ]
-
-        is_complete = final_step == 5
-
-        state = OnboardingState(
-            current_step=final_step,
+    # Determinar próximo campo
+    if data_turns >= len(DATA_FIELDS):
+        # Todos os campos já foram coletados — só falta processar o último
+        # A query atual é a resposta do último campo
+        last_field = DATA_FIELDS[-1]
+        collected[last_field.value] = current_query
+        return OnboardingState(
+            current_field=OnboardingField.COMPLETED,
             collected=collected,
-            errors=errors,
-            pending_fields=pending,
-            is_complete=is_complete,
+            is_complete=True,
+            field_value=current_query,
         )
 
-        logger.info(
-            "📋 [ONBOARDING] State computed",
-            current_step=final_step,
-            collected_fields=list(collected.keys()),
-            errors=errors,
-            pending_fields=pending,
-            is_complete=is_complete,
-        )
+    # O campo atual é o que estamos esperando
+    current_field = DATA_FIELDS[data_turns]
 
-        return state
+    logger.info(
+        "📋 [ONBOARDING] State determined",
+        current_field=current_field.value,
+        collected_count=len(collected),
+        collected_fields=list(collected.keys()),
+        history_turns=len(history),
+        data_turns=data_turns,
+    )
+
+    return OnboardingState(
+        current_field=current_field,
+        collected=collected,
+        field_value=current_query,
+    )
 
 
 # =============================================================================
-# Build context — gera instrução determinística para o LLM
+# Gerador de contexto para o LLM
 # =============================================================================
 
 def build_onboarding_context(state: OnboardingState) -> str:
     """
-    Gera uma instrução clara e determinística para o LLM.
+    Gera instrução determinística para o LLM.
 
-    Em vez de confiar no LLM para detectar etapa/validar dados,
-    dizemos EXATAMENTE o que ele deve fazer:
-
-    - Qual etapa estamos
-    - Quais dados já foram coletados (validados)
-    - Quais erros de validação ocorreram
-    - Quais campos ainda faltam
-
-    O LLM só precisa ser conversacional — a lógica está em Python.
+    O LLM recebe o template de resposta e os dados já coletados.
+    Só precisa humanizar o texto — a lógica está em Python.
     """
     lines: list[str] = []
-    lines.append("\n## [INSTRUÇÃO DE ONBOARDING — GERADA POR CÓDIGO, SIGA À RISCA]")
+    lines.append("\n## [INSTRUÇÃO DE ONBOARDING — SIGA À RISCA]")
+    lines.append("IMPORTANTE: NÃO chame search_knowledge_base para onboarding. "
+                 "Use SOMENTE as instruções abaixo.")
 
     if state.is_complete:
         lines.append("\n### ✅ ONBOARDING COMPLETO!")
-        lines.append("Todos os dados foram coletados e validados com sucesso.")
+        lines.append("Todos os dados foram coletados com sucesso.")
         lines.append("Informe ao cliente que o cadastro será processado.")
-        lines.append("\nResumo dos dados coletados (NÃO inclua a senha no resumo):")
-        for field_name, value in state.collected.items():
-            if field_name in ("password", "passwordConfirmation"):
+        lines.append("\nResumo dos dados (NÃO inclua a senha):")
+        for fld in DATA_FIELDS:
+            if fld in (OnboardingField.PASSWORD, OnboardingField.PASSWORD_CONFIRMATION):
                 continue
-            label = FIELD_LABELS.get(field_name, field_name)
+            value = state.collected.get(fld.value, "—")
+            label = FIELD_LABELS.get(fld, fld.value)
             lines.append(f"- {label}: {value}")
         return "\n".join(lines)
 
-    step_names = {
-        1: "Etapa 1 — Dados da Empresa",
-        2: "Etapa 2 — Dados do Representante Legal",
-        3: "Etapa 3 — Criação de Senha",
-        4: "Etapa 4 — Confirmação de Senha",
-    }
+    if state.has_validation_error:
+        label = FIELD_LABELS.get(state.current_field, state.current_field.value)
+        hint = FIELD_FORMAT_HINTS.get(state.current_field, "")
+        lines.append(f"\n### ⚠️ Dado rejeitado: {label}")
+        lines.append(f"Erro: {state.validation_error}")
+        if hint:
+            lines.append(f"Formato esperado: {hint}")
+        lines.append("\n→ AÇÃO: Informe o erro de forma amigável e peça para digitar novamente.")
+        lines.append(f"   Peça SOMENTE o campo: {label}")
+        return "\n".join(lines)
 
-    lines.append(f"\n### Etapa atual: {step_names.get(state.current_step, 'Desconhecida')}")
-
-    # Dados já coletados
-    if state.collected:
-        lines.append("\n**Dados já coletados e validados ✅:**")
-        for field_name, value in state.collected.items():
-            if field_name in ("password", "passwordConfirmation"):
-                lines.append(f"- Senha: ******")
-                continue
-            label = FIELD_LABELS.get(field_name, field_name)
-            lines.append(f"- {label}: {value}")
-
-    # Erros de validação
-    if state.errors:
-        lines.append("\n**⚠️ Erros de validação encontrados (INFORME AO CLIENTE):**")
-        for error in state.errors:
-            lines.append(f"- {error}")
-        lines.append("\nPeça ao cliente para corrigir os dados acima ANTES de avançar.")
-
-    # Campos pendentes
-    if state.pending_fields:
-        lines.append("\n**Campos que FALTAM nesta etapa (PEÇA AO CLIENTE):**")
-        for field_name in state.pending_fields:
-            label = FIELD_LABELS.get(field_name, field_name)
-            lines.append(f"- {label}")
-
-    # Instrução final
-    if state.errors:
-        lines.append(
-            "\n→ AÇÃO: Informe os erros de validação acima e peça a correção. "
-            "NÃO avance para a próxima etapa."
-        )
-    elif state.pending_fields:
-        lines.append(
-            "\n→ AÇÃO: Peça os campos faltantes listados acima. "
-            "NÃO avance para a próxima etapa até ter todos."
-        )
-    else:
-        lines.append(
-            "\n→ AÇÃO: Todos os campos desta etapa foram coletados. "
-            "Confirme os dados e peça os da próxima etapa."
-        )
+    # Campo normal — pedir ao cliente
+    prompt_text = FIELD_PROMPTS.get(state.current_field, "")
+    label = FIELD_LABELS.get(state.current_field, state.current_field.value)
+    lines.append(f"\n### Próximo campo: {label}")
+    lines.append(f"\nResponda ao cliente com esta mensagem (pode humanizar levemente):")
+    lines.append(f'"{prompt_text}"')
+    lines.append("\n→ AÇÃO: Peça SOMENTE este campo. NÃO peça outros dados.")
 
     return "\n".join(lines)
 
 
+# =============================================================================
+# Detecção de intenção de onboarding
+# =============================================================================
+
 def is_onboarding_intent(query: str, history: list[dict[str, str]]) -> bool:
     """
-    Detecta se a conversa é de onboarding (abertura de conta).
+    Detecta se a conversa é sobre abertura de conta.
 
     Verifica:
       1. Se o histórico já contém contexto de onboarding
       2. Se a query atual menciona abertura de conta
     """
-    # Verificar se o histórico já tem respostas de onboarding (etapa, CNPJ, etc.)
     onboarding_keywords_in_history = [
         "abrir", "abertura", "conta pj", "conta PJ",
         "cnpj", "razão social", "razao social", "nome fantasia",
-        "representante", "etapa",
+        "representante", "passo a passo", "dados da empresa",
     ]
 
     for turn in history:
@@ -616,7 +341,6 @@ def is_onboarding_intent(query: str, history: list[dict[str, str]]) -> bool:
         if any(kw.lower() in combined for kw in onboarding_keywords_in_history):
             return True
 
-    # Verificar query atual
     onboarding_keywords_query = [
         "abrir conta", "abertura", "criar conta", "nova conta",
         "quero conta", "abrir uma conta", "abrir minha conta",

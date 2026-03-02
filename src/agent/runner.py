@@ -29,9 +29,10 @@ from src.core.models import AgentRequest, AgentResponse
 from src.agent.graph import agent_graph
 from src.agent.prompts import PLANNER_PROMPT
 from src.agent.onboarding import (
-    OnboardingStateMachine,
+    determine_current_field,
     build_onboarding_context,
     is_onboarding_intent,
+    OnboardingField,
 )
 from src.observability.metrics import estimate_cost
 from src.observability.logging import get_logger
@@ -80,28 +81,31 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
     if request.profile:
         context += f"\n\nPerfil do cliente (JSON):\n{profile_json}"
 
-    # ─── Onboarding: validação determinística ──────────────────────
-    # Se a conversa é sobre abertura de conta, injeta instruções
-    # geradas por código (etapa atual, dados validados, erros).
-    # O LLM recebe o que fazer — não precisa inferir sozinho.
+    # ─── Onboarding: fluxo campo-a-campo ───────────────────────────
+    # Se a conversa é sobre abertura de conta, determina qual campo
+    # pedir agora e injeta instrução determinística no prompt.
+    # O agente só conversa — validação fica no BFA (Go).
     history_dicts = [
         {"query": turn.query, "answer": turn.answer}
         for turn in request.history
     ]
 
+    onboarding_state = None
     if is_onboarding_intent(request.query, history_dicts):
-        sm = OnboardingStateMachine()
-        onboarding_state = sm.process(history_dicts, request.query)
+        onboarding_state = determine_current_field(
+            history_dicts,
+            request.query,
+            validation_error=getattr(request, "validation_error", "") or "",
+        )
         onboarding_ctx = build_onboarding_context(onboarding_state)
         context += onboarding_ctx
 
         logger.info(
             "📋 [RUNNER] ONBOARDING_CONTEXT_INJECTED",
             customer_id=request.customer_id,
-            onboarding_step=onboarding_state.current_step,
-            collected_fields=list(onboarding_state.collected.keys()),
-            errors=onboarding_state.errors,
-            pending_fields=onboarding_state.pending_fields,
+            current_field=onboarding_state.current_field.value,
+            collected_count=len(onboarding_state.collected),
+            has_validation_error=onboarding_state.has_validation_error,
             is_complete=onboarding_state.is_complete,
         )
 
@@ -260,6 +264,22 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
 
     # ─── Passo 5: Empacotar resposta ──────────────────────────────
     from src.core.models import AgentMetadata
+
+    # Se estamos em onboarding, incluir current_field e field_value
+    # para o BFA saber qual campo validar e com qual valor.
+    current_field = None
+    field_value = None
+    if onboarding_state is not None:
+        current_field = onboarding_state.current_field.value
+        field_value = onboarding_state.field_value or None
+        # Forçar context e intent para onboarding
+        if not onboarding_state.is_complete:
+            context = "onboarding"
+            intent = "open_account"
+        else:
+            context = "onboarding"
+            intent = "open_account"
+
     return AgentResponse(
         customer_id=request.customer_id,
         answer=answer,
@@ -267,6 +287,8 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
         intent=intent,
         confidence=confidence,
         suggested_actions=suggested_actions,
+        current_field=current_field,
+        field_value=field_value,
         metadata=AgentMetadata(
             reasoning=result.get("steps", []),
             sources=result.get("sources", []),

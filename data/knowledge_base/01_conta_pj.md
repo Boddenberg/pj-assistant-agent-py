@@ -13,8 +13,63 @@ Conta bancária digital para empresas. Permite PIX, pagamento de boletos, cartã
 - **payment** — conta de pagamento para recebimentos e pagamentos.
 - **escrow** — conta garantia para custódia de valores.
 
-## Abertura de Conta PJ — Dados necessários para abrir conta
-Para abrir conta PJ pelo app (context: onboarding), são necessários exatamente 9 campos: CNPJ (cnpj), Razão Social (razaoSocial), Nome Fantasia (nomeFantasia), E-mail (email), Nome do representante (representanteName), CPF do representante (representanteCpf), Telefone (representantePhone), Data de nascimento (representanteBirthDate) e Senha (password) numérica de 6 dígitos. Somente esses 9 campos — nenhum outro documento é exigido, não é necessário contrato social, documentos dos sócios nem comprovante de endereço. Após cadastro a conta é criada com número de agencia e conta. Abertura gratuita, 100% digital. Cada CNPJ só pode ter um cadastro. Login: CPF do representante + senha 6 dígitos;
+## Abertura de Conta PJ — Fluxo de Onboarding em 4 Etapas
+
+A abertura é 100% digital, gratuita, feita pelo chat. Cada CNPJ só pode ter um cadastro. São 9 campos divididos em 4 etapas obrigatórias:
+
+### ETAPA 1 — Dados da Empresa
+Campos obrigatórios nesta etapa:
+1. **CNPJ** (`cnpj`) — formato: XX.XXX.XXX/XXXX-XX (14 dígitos). Validar formato.
+2. **Razão Social** (`razaoSocial`) — nome oficial da empresa. Mínimo 3 caracteres.
+3. **Nome Fantasia** (`nomeFantasia`) — nome comercial. Mínimo 2 caracteres.
+4. **E-mail** (`email`) — e-mail corporativo. Deve conter @ e domínio válido.
+
+Regras da Etapa 1:
+- Todos os 4 campos são obrigatórios para avançar.
+- O cliente pode enviar todos de uma vez ou um por um.
+- Se algum dado estiver inválido, pedir correção SEM avançar.
+- Quando os 4 campos forem válidos, confirmar os dados e pedir os da Etapa 2.
+
+### ETAPA 2 — Dados do Representante Legal
+Campos obrigatórios nesta etapa:
+1. **Nome do representante** (`representanteName`) — nome completo. Mínimo 5 caracteres.
+2. **CPF do representante** (`representanteCpf`) — formato: XXX.XXX.XXX-XX (11 dígitos). Validar formato.
+3. **Telefone** (`representantePhone`) — formato: (XX) XXXXX-XXXX ou (XX) XXXX-XXXX. Mínimo 10 dígitos.
+4. **Data de nascimento** (`representanteBirthDate`) — formato: DD/MM/AAAA. O representante deve ter 18+ anos.
+
+Regras da Etapa 2:
+- Só pedir esses dados APÓS a Etapa 1 estar completa.
+- O cliente pode enviar todos de uma vez ou um por um.
+- Se algum dado estiver inválido, pedir correção SEM avançar.
+- Quando os 4 campos forem válidos, confirmar os dados e pedir a Etapa 3.
+
+### ETAPA 3 — Criação de Senha
+Campos obrigatórios nesta etapa:
+1. **Senha** (`password`) — numérica, exatamente 6 dígitos. Não aceitar letras nem caracteres especiais.
+
+Regras da Etapa 3:
+- Só pedir a senha APÓS a Etapa 2 estar completa.
+- A senha deve ter EXATAMENTE 6 dígitos numéricos.
+- Se inválida, explicar os requisitos e pedir novamente.
+- Quando válida, pedir confirmação na Etapa 4.
+
+### ETAPA 4 — Confirmação de Senha
+Campos obrigatórios nesta etapa:
+1. **Confirmação de senha** (`passwordConfirmation`) — deve ser IDÊNTICA à senha da Etapa 3.
+
+Regras da Etapa 4:
+- Só pedir APÓS a Etapa 3 estar completa.
+- Comparar com a senha da Etapa 3 (disponível no histórico da conversa).
+- Se não coincidir, informar e pedir para digitar novamente.
+- Quando coincidir, confirmar que todos os dados foram coletados e o cadastro será processado.
+
+### Regras Gerais do Fluxo de Onboarding
+- NUNCA pular etapas. A ordem é sempre: Etapa 1 → Etapa 2 → Etapa 3 → Etapa 4.
+- NUNCA pedir dados de uma etapa posterior antes de completar a atual.
+- Se o cliente enviar dados fora de ordem, redirecionar para a etapa atual.
+- Usar o histórico da conversa para saber quais dados já foram coletados.
+- Ao confirmar dados de cada etapa, listar o que foi recebido de forma organizada.
+- Ser conversacional e encorajador ("Ótimo!", "Perfeito!", "Quase lá!").
 
 ## Status da Conta
 

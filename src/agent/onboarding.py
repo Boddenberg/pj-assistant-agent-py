@@ -151,7 +151,7 @@ FIELD_LABELS: dict[OnboardingField, str] = {
     OnboardingField.RAZAO_SOCIAL: "Razão Social",
     OnboardingField.NOME_FANTASIA: "Nome Fantasia",
     OnboardingField.EMAIL: "E-mail",
-    OnboardingField.REPRESENTANTE_NAME: "Representante",
+    OnboardingField.REPRESENTANTE_NAME: "Nome completo do representante",
     OnboardingField.REPRESENTANTE_CPF: "CPF do representante",
     OnboardingField.REPRESENTANTE_PHONE: "Telefone",
     OnboardingField.REPRESENTANTE_BIRTH_DATE: "Data de nascimento",
@@ -518,14 +518,42 @@ def build_onboarding_response(state: OnboardingState) -> str:
 # =============================================================================
 
 def build_onboarding_context(state: OnboardingState) -> str:
-    """Gera instrução determinística para o LLM (legado, não usado em v9)."""
+    """
+    Gera instrução determinística injetada no prompt do LLM.
+
+    Inclui:
+      - Campos já coletados (para o LLM saber o progresso)
+      - Qual campo pedir agora (com template)
+      - Reforço para NÃO pular, NÃO mudar, NÃO inventar campos
+    """
     lines: list[str] = []
     lines.append("\n## [INSTRUÇÃO DE ONBOARDING — SIGA À RISCA]")
     lines.append("IMPORTANTE: NÃO chame search_knowledge_base para onboarding.")
+    lines.append("NÃO pule campos. NÃO peça um campo diferente do indicado abaixo.")
 
+    # ── Progresso: campos já coletados ─────────────────────────────
+    if state.collected:
+        lines.append("\n### Campos já coletados:")
+        for fld in DATA_FIELDS:
+            if fld.value in state.collected:
+                label = FIELD_LABELS.get(fld, fld.value)
+                lines.append(f"  ✅ {label}")
+
+    # ── Campos restantes ───────────────────────────────────────────
+    remaining = [
+        FIELD_LABELS.get(fld, fld.value)
+        for fld in DATA_FIELDS
+        if fld.value not in state.collected
+        and fld != state.next_step
+    ]
+    if remaining and not state.is_complete:
+        lines.append(f"\n### Campos restantes depois deste: {', '.join(remaining)}")
+
+    # ── Onboarding completo ────────────────────────────────────────
     if state.is_complete:
         lines.append("\n### ✅ ONBOARDING COMPLETO!")
         lines.append("Todos os dados foram coletados com sucesso.")
+        lines.append("Parabenize o cliente e mostre o resumo.")
         lines.append("\nResumo dos dados (NÃO inclua a senha):")
         for fld in DATA_FIELDS:
             if fld in (OnboardingField.PASSWORD, OnboardingField.PASSWORD_CONFIRMATION):
@@ -535,6 +563,7 @@ def build_onboarding_context(state: OnboardingState) -> str:
             lines.append(f"- {label}: {value}")
         return "\n".join(lines)
 
+    # ── Erro de validação ──────────────────────────────────────────
     if state.has_validation_error:
         label = FIELD_LABELS.get(state.next_step, state.next_step.value)
         hint = FIELD_FORMAT_HINTS.get(state.next_step, "")
@@ -542,14 +571,17 @@ def build_onboarding_context(state: OnboardingState) -> str:
         lines.append(f"Erro: {state.validation_error}")
         if hint:
             lines.append(f"Formato esperado: {hint}")
-        lines.append(f"\n→ AÇÃO: Peça SOMENTE o campo: {label}")
+        lines.append(f"\n→ AÇÃO OBRIGATÓRIA: Peça SOMENTE o campo **{label}**.")
+        lines.append(f"⛔ NÃO peça nenhum outro campo. APENAS **{label}**.")
         return "\n".join(lines)
 
+    # ── Campo normal ───────────────────────────────────────────────
     prompt_text = FIELD_PROMPTS.get(state.next_step, "")
     label = FIELD_LABELS.get(state.next_step, state.next_step.value)
-    lines.append(f"\n### Próximo campo: {label}")
-    lines.append(f'\n"{prompt_text}"')
-    lines.append("\n→ AÇÃO: Peça SOMENTE este campo.")
+    lines.append(f"\n### Próximo campo a pedir: **{label}**")
+    lines.append(f'\nMensagem sugerida:\n"{prompt_text}"')
+    lines.append(f"\n→ AÇÃO OBRIGATÓRIA: Peça SOMENTE o campo **{label}**.")
+    lines.append(f"⛔ NÃO peça nenhum outro campo. APENAS **{label}**.")
     return "\n".join(lines)
 
 

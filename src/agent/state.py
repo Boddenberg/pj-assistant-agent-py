@@ -57,3 +57,9 @@ class AgentState(TypedDict):
     # Contadores de tokens — para métricas e estimativa de custo.
     tokens_in: int
     tokens_out: int
+
+    # Instrução de onboarding para o synthesizer — campo exato a pedir.
+    # Preenchido pelo runner quando há onboarding ativo.
+    # Ex: "Peça SOMENTE o campo **Representante** (nome completo do representante)."
+    onboarding_synth_instruction: str
+

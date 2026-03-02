@@ -31,9 +31,9 @@ from src.agent.prompts import PLANNER_PROMPT
 from src.agent.onboarding import (
     determine_current_field,
     build_onboarding_context,
-    build_onboarding_response,
     is_onboarding_intent,
-    OnboardingField,
+    FIELD_LABELS,
+    FIELD_PROMPTS,
 )
 from src.observability.metrics import estimate_cost
 from src.observability.logging import get_logger
@@ -41,24 +41,25 @@ from src.observability.logging import get_logger
 logger = get_logger("runner")
 
 
-async def run_agent(request: AgentRequest) -> AgentResponse:
+async def run_agent(request: AgentRequest, original_query: str | None = None) -> AgentResponse:
     """
     Executa o workflow completo do agente para uma requisição do BFA.
 
-    Fluxo:
-      1. Monta mensagem inicial com contexto do cliente
-      2. Cria estado inicial do grafo
-      3. Invoca o grafo (ainvoke = async invoke)
-      4. Extrai resposta final da última mensagem
-      5. Calcula métricas (tokens, custo)
-      6. Retorna AgentResponse
-
     Args:
         request: Dados do cliente vindos do BFA (perfil + transações + query).
+                 A query pode estar sanitizada (PII mascarado).
+        original_query: Query original antes da máscara PII.
+                        Usada pelo onboarding para validar dados reais
+                        (CNPJ, CPF, email) que o cliente está fornecendo.
 
     Returns:
         AgentResponse com resposta, reasoning, métricas.
     """
+
+    # Query para onboarding: original (sem máscara) quando disponível.
+    # O onboarding PRECISA do dado real para validar CNPJ, CPF, etc.
+    # A máscara PII é só para o texto enviado ao LLM.
+    onboarding_query = original_query or request.query
 
     # ─── Passo 1: Montar o contexto inicial ────────────────────────
     context_start = time.perf_counter()
@@ -97,10 +98,10 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
     ]
 
     onboarding_state = None
-    if is_onboarding_intent(request.query, history_dicts):
+    if is_onboarding_intent(onboarding_query, history_dicts):
         onboarding_state = determine_current_field(
             history_dicts,
-            request.query,
+            onboarding_query,
             validation_error=getattr(request, "validation_error", "") or "",
         )
 
@@ -116,44 +117,24 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
             max_retries_exceeded=onboarding_state.max_retries_exceeded,
         )
 
-        # ─── BYPASS DO LLM ─────────────────────────────────────────
-        # Onboarding usa resposta determinística (templates).
-        # O LLM não é invocado — evita alucinações.
-        # Cada campo tem um template fixo em FIELD_PROMPTS.
-        deterministic_answer = build_onboarding_response(onboarding_state)
+        # Injetar contexto de onboarding no prompt para o LLM
+        onboarding_context = build_onboarding_context(onboarding_state)
+        context += f"\n\n{onboarding_context}"
 
-        step_value = onboarding_state.step.value
-        next_step_value = onboarding_state.next_step.value
-        field_value = onboarding_state.field_value or None
-
-        logger.info(
-            "📦 [RUNNER] ONBOARDING_RESPONSE — Resposta determinística (sem LLM)",
-            customer_id=request.customer_id,
-            step=step_value,
-            next_step=next_step_value,
-            field_value=field_value,
-            answer_length=len(deterministic_answer),
-            is_complete=onboarding_state.is_complete,
+    # Construir instrução de onboarding explícita para o synthesizer
+    onboarding_synth_hint = ""
+    if onboarding_state and not onboarding_state.is_complete:
+        label = FIELD_LABELS.get(onboarding_state.next_step, onboarding_state.next_step.value)
+        prompt_text = FIELD_PROMPTS.get(onboarding_state.next_step, "")
+        onboarding_synth_hint = (
+            f"⚠️ ONBOARDING ATIVO — NÃO mude o campo pedido.\n"
+            f"O campo a pedir agora é: **{label}**\n"
+            f"Mensagem sugerida: \"{prompt_text}\"\n"
+            f"→ Peça SOMENTE **{label}**. NÃO peça nenhum outro campo."
         )
-
-        from src.core.models import AgentMetadata
-
-        return AgentResponse(
-            customer_id=request.customer_id,
-            answer=deterministic_answer,
-            context="onboarding",
-            intent="open_account",
-            confidence=1.0,
-            suggested_actions=["Continuar cadastro", "Cancelar abertura"],
-            step=step_value,
-            field_value=field_value,
-            next_step=next_step_value,
-            metadata=AgentMetadata(
-                reasoning=[],
-                sources=[],
-                tokens_used=0,
-                estimated_cost_usd=0.0,
-            ),
+    elif onboarding_state and onboarding_state.is_complete:
+        onboarding_synth_hint = (
+            "⚠️ ONBOARDING COMPLETO — Parabenize o cliente e mostre o resumo dos dados coletados."
         )
 
     context_duration = (time.perf_counter() - context_start) * 1000
@@ -189,6 +170,7 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
         "customer_id": request.customer_id,
         "tokens_in": 0,
         "tokens_out": 0,
+        "onboarding_synth_instruction": onboarding_synth_hint,
     }
 
     logger.info(
@@ -312,6 +294,12 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
     # ─── Passo 5: Empacotar resposta ──────────────────────────────
     from src.core.models import AgentMetadata
 
+    # Se for onboarding, enriquecer resposta com campos de controle
+    if onboarding_state:
+        context = "onboarding"
+        intent = "open_account"
+        suggested_actions = ["Continuar cadastro", "Cancelar abertura"]
+
     return AgentResponse(
         customer_id=request.customer_id,
         answer=answer,
@@ -319,9 +307,9 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
         intent=intent,
         confidence=confidence,
         suggested_actions=suggested_actions,
-        step=None,
-        field_value=None,
-        next_step=None,
+        step=onboarding_state.step.value if onboarding_state else None,
+        field_value=onboarding_state.field_value if onboarding_state else None,
+        next_step=onboarding_state.next_step.value if onboarding_state else None,
         metadata=AgentMetadata(
             reasoning=result.get("steps", []),
             sources=result.get("sources", []),

@@ -28,7 +28,8 @@ from fastapi import FastAPI
 from prometheus_client import make_asgi_app
 
 from src.api.routes import router
-from src.observability.logging import setup_logging
+from src.core.config import settings
+from src.observability.logging import setup_logging, get_logger
 from src.observability.tracing import setup_tracing
 
 
@@ -40,27 +41,57 @@ from src.observability.tracing import setup_tracing
 async def lifespan(app: FastAPI):
     """
     Gerencia o ciclo de vida da aplicação.
-
-    STARTUP (antes do yield):
-      - Configura logging estruturado (structlog → JSON)
-      - Configura tracing distribuído (OpenTelemetry)
-      - Em produção: poderia pre-carregar o vector store aqui
-
-    SHUTDOWN (depois do yield):
-      - Não temos cleanup obrigatório por enquanto
-      - Em produção: fechar conexões, flush de métricas, etc.
     """
     # ── Startup ──────────────────────────────────────────────────────
-    setup_logging()     # structlog com JSON (ver observability/logging.py)
-    setup_tracing()     # OpenTelemetry OTLP (ver observability/tracing.py)
+    setup_logging()
+    setup_tracing()
 
-    # yield = aplicação rodando e servindo requests
+    logger = get_logger("startup")
+
+    banner = f"""
+╔══════════════════════════════════════════════════════════════╗
+║                                                              ║
+║   🏦  PJ ASSISTANT AGENT — Itaú IA Generativa               ║
+║                                                              ║
+║   ✅ Servidor iniciado com sucesso!                          ║
+║                                                              ║
+╠══════════════════════════════════════════════════════════════╣
+║                                                              ║
+║   🌐 Host:        {settings.host:<40}║
+║   🔌 Porta:       {settings.port:<40}║
+║   🤖 Modelo LLM:  {settings.llm_model:<40}║
+║   🌡️  Temperatura: {str(settings.llm_temperature):<40}║
+║   📊 Log Level:   {settings.log_level:<40}║
+║                                                              ║
+╠══════════════════════════════════════════════════════════════╣
+║                                                              ║
+║   📖 Swagger UI:   http://{settings.host}:{settings.port}/docs{' ' * (25 - len(str(settings.port)))}║
+║   ❤️  Health:       http://{settings.host}:{settings.port}/healthz{' ' * (22 - len(str(settings.port)))}║
+║   📊 Métricas:     http://{settings.host}:{settings.port}/metrics{' ' * (22 - len(str(settings.port)))}║
+║   🤖 Chat:         POST /v1/chat{' ' * 30}║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+"""
+    print(banner)
+
+    logger.info(
+        "🚀 SERVER_STARTED — PJ Assistant Agent iniciado com sucesso",
+        host=settings.host,
+        port=settings.port,
+        llm_model=settings.llm_model,
+        llm_temperature=settings.llm_temperature,
+        log_level=settings.log_level,
+        embedding_model=settings.embedding_model,
+        rag_top_k=settings.rag_top_k,
+        max_tokens_per_request=settings.max_tokens_per_request,
+        max_cost_per_request_usd=settings.max_cost_per_request_usd,
+    )
+
     yield
 
     # ── Shutdown ─────────────────────────────────────────────────────
-    # Nada por enquanto. Em produção:
-    # - await close_db_connections()
-    # - tracer_provider.shutdown()
+    logger.info("🛑 SERVER_STOPPING — PJ Assistant Agent encerrando...")
+    print("\n🛑 PJ Assistant Agent encerrado. Até a próxima! 👋")
 
 
 # =============================================================================

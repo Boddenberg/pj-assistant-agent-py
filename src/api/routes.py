@@ -105,6 +105,7 @@ async def chat(request: AgentRequest) -> AgentResponse:
         num_transactions=len(request.transactions),
         segment=request.profile.segment if request.profile else "N/A",
         credit_score=request.profile.credit_score if request.profile else 0,
+        request_body=request.model_dump(mode="json"),
     )
 
     # Cria um span OpenTelemetry para rastreamento distribuído.
@@ -117,6 +118,12 @@ async def chat(request: AgentRequest) -> AgentResponse:
             # ─────────────────────────────────────────────────────
             validation_start = time.perf_counter()
             request.query = validate_input(request.query)
+
+            # Preservar query original ANTES da máscara PII.
+            # O onboarding precisa do dado real (CNPJ, CPF, email)
+            # porque é exatamente o que o cliente está fornecendo.
+            # A máscara só se aplica ao texto enviado ao LLM.
+            original_query = request.query
             request.query = mask_sensitive_data(request.query)
             validation_duration = (time.perf_counter() - validation_start) * 1000
 
@@ -124,6 +131,7 @@ async def chat(request: AgentRequest) -> AgentResponse:
                 "🛡️  [2/6] INPUT_VALIDATED — Input validado e sanitizado",
                 customer_id=request.customer_id,
                 sanitized_query=request.query[:100] + ("..." if len(request.query) > 100 else ""),
+                original_query_preserved=original_query != request.query,
                 validation_duration_ms=round(validation_duration, 2),
             )
 
@@ -140,7 +148,7 @@ async def chat(request: AgentRequest) -> AgentResponse:
                 max_tokens=settings.max_tokens_per_request,
             )
 
-            response = await run_agent(request)
+            response = await run_agent(request, original_query=original_query)
 
             agent_duration = (time.perf_counter() - agent_start) * 1000
 

@@ -247,8 +247,17 @@ def synthesizer_node(state: AgentState) -> dict:
         "Agora gere a resposta final para o cliente no chat do app. "
         "Lembre-se: é um CHAT, não um email. Seja direto, conversacional e curto. "
         "Não use formato de relatório. Não assine a mensagem. "
-        "Vá direto ao ponto com os dados que você já analisou."
+        "Vá direto ao ponto com os dados que você já analisou. "
+        "REGRA CRÍTICA DE ONBOARDING: Se a instrução de onboarding pediu um campo específico "
+        "(ex: E-mail, CNPJ, CPF, Telefone), você DEVE pedir EXATAMENTE esse campo. "
+        "NÃO troque por outro campo. NÃO pule etapas. NÃO peça mais de um campo por vez. "
+        "Confie na instrução de onboarding — ela controla a sequência."
     )
+
+    # Se há instrução de onboarding explícita, adiciona ao synth_instruction
+    onboarding_hint = state.get("onboarding_synth_instruction", "")
+    if onboarding_hint:
+        synth_instruction += f"\n\n{onboarding_hint}"
 
     messages = (
         [SystemMessage(content=SYSTEM_PROMPT)]

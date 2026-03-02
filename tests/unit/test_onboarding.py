@@ -1,9 +1,10 @@
 """
-Testes unitários — onboarding campo-a-campo (v8.0.0).
+Testes unitários — onboarding campo-a-campo (v8.1.0).
 
 Testa o módulo de onboarding conversacional que:
   - Determina qual campo pedir com base no histórico
-  - Gera instruções determinísticas para o LLM
+  - Gera instruções determinísticas para o LLM (build_onboarding_context)
+  - Gera respostas determinísticas SEM LLM (build_onboarding_response)
   - Detecta intenção de abertura de conta
 
 O agente NÃO valida dados — isso é responsabilidade do BFA (Go).
@@ -20,6 +21,7 @@ from src.agent.onboarding import (
     FIELD_FORMAT_HINTS,
     determine_current_field,
     build_onboarding_context,
+    build_onboarding_response,
     is_onboarding_intent,
 )
 
@@ -396,6 +398,161 @@ class TestBuildOnboardingContext:
             )
             ctx = build_onboarding_context(state)
             assert "search_knowledge_base" in ctx
+
+
+# =============================================================================
+# TestBuildOnboardingResponse — resposta determinística (sem LLM)
+# =============================================================================
+
+class TestBuildOnboardingResponse:
+    """Testes da função build_onboarding_response (v8.1.0 — bypass do LLM)."""
+
+    def test_welcome_response(self):
+        """Welcome: retorna template de boas-vindas pedindo CNPJ."""
+        state = OnboardingState(
+            current_field=OnboardingField.WELCOME,
+            next_field=OnboardingField.WELCOME,
+            field_value="Quero abrir conta",
+        )
+        resp = build_onboarding_response(state)
+        assert "CNPJ" in resp
+        assert "passo a passo" in resp.lower() or "guiar" in resp.lower()
+
+    def test_normal_field_uses_template(self):
+        """Campo normal: resposta É o template de FIELD_PROMPTS."""
+        state = OnboardingState(
+            current_field=OnboardingField.CNPJ,
+            next_field=OnboardingField.RAZAO_SOCIAL,
+            collected={OnboardingField.CNPJ.value: "12.345.678/0001-99"},
+            field_value="12.345.678/0001-99",
+        )
+        resp = build_onboarding_response(state)
+        assert resp == FIELD_PROMPTS[OnboardingField.RAZAO_SOCIAL]
+
+    def test_nome_fantasia_to_email_response(self):
+        """Caso que causava alucinação: Nome Fantasia → Email."""
+        state = OnboardingState(
+            current_field=OnboardingField.NOME_FANTASIA,
+            next_field=OnboardingField.EMAIL,
+            collected={
+                OnboardingField.CNPJ.value: "87382356000115",
+                OnboardingField.RAZAO_SOCIAL.value: "Kasjsjskaja",
+                OnboardingField.NOME_FANTASIA.value: "Uauauahaha",
+            },
+            field_value="Uauauahaha",
+        )
+        resp = build_onboarding_response(state)
+        assert "Nome Fantasia recebido" in resp
+        assert "e-mail" in resp.lower()
+        # NÃO deve conter "telefone" — era a alucinação
+        assert "telefone" not in resp.lower()
+
+    def test_each_field_transition_uses_correct_template(self):
+        """Cada transição de campo deve usar o template correto."""
+        for i, field in enumerate(DATA_FIELDS):
+            if i + 1 < len(DATA_FIELDS):
+                next_field = DATA_FIELDS[i + 1]
+            else:
+                next_field = OnboardingField.COMPLETED
+            state = OnboardingState(
+                current_field=field,
+                next_field=next_field,
+                collected={field.value: "valor_qualquer"},
+                is_complete=(next_field == OnboardingField.COMPLETED),
+                field_value="valor_qualquer",
+            )
+            resp = build_onboarding_response(state)
+            if next_field == OnboardingField.COMPLETED:
+                # Último campo → resposta de conclusão
+                assert "✅" in resp
+            else:
+                # Template do próximo campo
+                expected_template = FIELD_PROMPTS[next_field]
+                assert resp == expected_template, (
+                    f"Transition {field.value} → {next_field.value}: "
+                    f"expected template for {next_field.value}"
+                )
+
+    def test_validation_error_response(self):
+        """Erro de validação: mensagem amigável com motivo e dica."""
+        state = OnboardingState(
+            current_field=OnboardingField.CNPJ,
+            next_field=OnboardingField.CNPJ,
+            has_validation_error=True,
+            validation_error="CNPJ deve ter 14 dígitos",
+            field_value="123",
+        )
+        resp = build_onboarding_response(state)
+        assert "⚠️" in resp
+        assert "CNPJ" in resp
+        assert "14 dígitos" in resp
+        assert "novamente" in resp.lower()
+
+    def test_validation_error_includes_hint(self):
+        """Erro de validação deve incluir dica de formato."""
+        state = OnboardingState(
+            current_field=OnboardingField.EMAIL,
+            next_field=OnboardingField.EMAIL,
+            has_validation_error=True,
+            validation_error="Email inválido",
+            field_value="invalido",
+        )
+        resp = build_onboarding_response(state)
+        assert "contato@empresa.com" in resp  # from FIELD_FORMAT_HINTS
+
+    def test_completed_response(self):
+        """Completo: mostra resumo sem a senha."""
+        collected = {
+            OnboardingField.CNPJ.value: "12.345.678/0001-99",
+            OnboardingField.RAZAO_SOCIAL.value: "Empresa Teste LTDA",
+            OnboardingField.NOME_FANTASIA.value: "Empresa Teste",
+            OnboardingField.EMAIL.value: "contato@empresa.com",
+            OnboardingField.REPRESENTANTE_NAME.value: "João da Silva",
+            OnboardingField.REPRESENTANTE_CPF.value: "123.456.789-00",
+            OnboardingField.REPRESENTANTE_PHONE.value: "(11) 99999-8888",
+            OnboardingField.REPRESENTANTE_BIRTH_DATE.value: "15/03/1990",
+            OnboardingField.PASSWORD.value: "123456",
+            OnboardingField.PASSWORD_CONFIRMATION.value: "123456",
+        }
+        state = OnboardingState(
+            current_field=OnboardingField.PASSWORD_CONFIRMATION,
+            next_field=OnboardingField.COMPLETED,
+            collected=collected,
+            is_complete=True,
+        )
+        resp = build_onboarding_response(state)
+        assert "✅" in resp
+        assert "12.345.678/0001-99" in resp  # CNPJ no resumo
+        assert "João da Silva" in resp  # nome no resumo
+        assert "123456" not in resp  # senha NÃO no resumo
+
+    def test_completed_response_excludes_password_fields(self):
+        """No resumo, PASSWORD e PASSWORD_CONFIRMATION não aparecem."""
+        collected = {f.value: f"valor_{f.value}" for f in DATA_FIELDS}
+        state = OnboardingState(
+            current_field=OnboardingField.PASSWORD_CONFIRMATION,
+            next_field=OnboardingField.COMPLETED,
+            collected=collected,
+            is_complete=True,
+        )
+        resp = build_onboarding_response(state)
+        assert "valor_password" not in resp
+        assert "valor_passwordConfirmation" not in resp
+
+    def test_response_is_deterministic(self):
+        """Mesma entrada → mesma saída, sempre."""
+        state = OnboardingState(
+            current_field=OnboardingField.RAZAO_SOCIAL,
+            next_field=OnboardingField.NOME_FANTASIA,
+            collected={
+                OnboardingField.CNPJ.value: "12345678000199",
+                OnboardingField.RAZAO_SOCIAL.value: "Teste",
+            },
+            field_value="Teste",
+        )
+        resp1 = build_onboarding_response(state)
+        resp2 = build_onboarding_response(state)
+        assert resp1 == resp2
 
 
 # =============================================================================

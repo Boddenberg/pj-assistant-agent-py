@@ -31,6 +31,7 @@ from src.agent.prompts import PLANNER_PROMPT
 from src.agent.onboarding import (
     determine_current_field,
     build_onboarding_context,
+    build_onboarding_response,
     is_onboarding_intent,
     OnboardingField,
 )
@@ -97,16 +98,53 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
             request.query,
             validation_error=getattr(request, "validation_error", "") or "",
         )
-        onboarding_ctx = build_onboarding_context(onboarding_state)
-        context += onboarding_ctx
 
         logger.info(
-            "📋 [RUNNER] ONBOARDING_CONTEXT_INJECTED",
+            "📋 [RUNNER] ONBOARDING_STATE_DETERMINED",
             customer_id=request.customer_id,
             current_field=onboarding_state.current_field.value,
+            next_field=onboarding_state.next_field.value,
             collected_count=len(onboarding_state.collected),
             has_validation_error=onboarding_state.has_validation_error,
             is_complete=onboarding_state.is_complete,
+        )
+
+        # ─── BYPASS DO LLM ─────────────────────────────────────────
+        # Onboarding usa resposta determinística (templates).
+        # O LLM não é invocado — evita alucinações.
+        # Cada campo tem um template fixo em FIELD_PROMPTS.
+        deterministic_answer = build_onboarding_response(onboarding_state)
+
+        current_field = onboarding_state.current_field.value
+        field_value = onboarding_state.field_value or None
+
+        logger.info(
+            "📦 [RUNNER] ONBOARDING_RESPONSE — Resposta determinística (sem LLM)",
+            customer_id=request.customer_id,
+            current_field=current_field,
+            next_field=onboarding_state.next_field.value,
+            field_value=field_value,
+            answer_length=len(deterministic_answer),
+            is_complete=onboarding_state.is_complete,
+        )
+
+        from src.core.models import AgentMetadata
+
+        return AgentResponse(
+            customer_id=request.customer_id,
+            answer=deterministic_answer,
+            context="onboarding",
+            intent="open_account",
+            confidence=1.0,
+            suggested_actions=["Continuar cadastro", "Cancelar abertura"],
+            current_field=current_field,
+            field_value=field_value,
+            metadata=AgentMetadata(
+                reasoning=[],
+                sources=[],
+                tokens_used=0,
+                estimated_cost_usd=0.0,
+            ),
         )
 
     context_duration = (time.perf_counter() - context_start) * 1000
@@ -265,21 +303,6 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
     # ─── Passo 5: Empacotar resposta ──────────────────────────────
     from src.core.models import AgentMetadata
 
-    # Se estamos em onboarding, incluir current_field e field_value
-    # para o BFA saber qual campo validar e com qual valor.
-    current_field = None
-    field_value = None
-    if onboarding_state is not None:
-        current_field = onboarding_state.current_field.value
-        field_value = onboarding_state.field_value or None
-        # Forçar context e intent para onboarding
-        if not onboarding_state.is_complete:
-            context = "onboarding"
-            intent = "open_account"
-        else:
-            context = "onboarding"
-            intent = "open_account"
-
     return AgentResponse(
         customer_id=request.customer_id,
         answer=answer,
@@ -287,8 +310,8 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
         intent=intent,
         confidence=confidence,
         suggested_actions=suggested_actions,
-        current_field=current_field,
-        field_value=field_value,
+        current_field=None,
+        field_value=None,
         metadata=AgentMetadata(
             reasoning=result.get("steps", []),
             sources=result.get("sources", []),

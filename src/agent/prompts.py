@@ -18,7 +18,7 @@ Em produção:
 """
 
 # Versão do prompt — incrementar a cada mudança significativa.
-PROMPT_VERSION = "8.0.0"
+PROMPT_VERSION = "8.1.0"
 
 
 # =============================================================================

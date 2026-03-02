@@ -340,6 +340,57 @@ def build_onboarding_context(state: OnboardingState) -> str:
 # Detecção de intenção de onboarding
 # =============================================================================
 
+def build_onboarding_response(state: OnboardingState) -> str:
+    """
+    Gera a resposta FINAL para o cliente — determinística, sem LLM.
+
+    Arquitetura v8.1:
+      O onboarding não precisa de IA para gerar respostas.
+      Cada passo é um template fixo. Usar o LLM causava alucinações
+      (ex: LLM respondia "E-mail recebido! Confirme telefone" quando
+      a instrução dizia "Nome Fantasia recebido! Informe e-mail").
+
+      Solução: bypass total do LLM para onboarding.
+      O template do FIELD_PROMPTS É a resposta final.
+
+    Returns:
+        String com a resposta pronta para o cliente.
+    """
+    if state.is_complete:
+        lines = ["Todos os dados foram recebidos! ✅🎉\n"]
+        lines.append("Confira o resumo do cadastro:\n")
+        for fld in DATA_FIELDS:
+            if fld in (OnboardingField.PASSWORD, OnboardingField.PASSWORD_CONFIRMATION):
+                continue
+            value = state.collected.get(fld.value, "—")
+            label = FIELD_LABELS.get(fld, fld.value)
+            lines.append(f"- **{label}**: {value}")
+        lines.append(
+            "\nSeu cadastro será processado e em breve sua conta "
+            "PJ estará pronta! 🚀"
+        )
+        return "\n".join(lines)
+
+    if state.has_validation_error:
+        label = FIELD_LABELS.get(state.next_field, state.next_field.value)
+        hint = FIELD_FORMAT_HINTS.get(state.next_field, "")
+        lines = [f"⚠️ O dado informado para **{label}** não está válido."]
+        lines.append(f"Motivo: {state.validation_error}")
+        if hint:
+            lines.append(f"\n{hint}")
+        lines.append(f"\nPor favor, informe o **{label}** novamente.")
+        return "\n".join(lines)
+
+    # Campo normal — usar o template diretamente
+    prompt_text = FIELD_PROMPTS.get(state.next_field, "")
+    if prompt_text:
+        return prompt_text
+
+    # Fallback (não deveria chegar aqui)
+    label = FIELD_LABELS.get(state.next_field, state.next_field.value)
+    return f"Agora preciso do **{label}**."
+
+
 def is_onboarding_intent(query: str, history: list[dict[str, str]]) -> bool:
     """
     Detecta se a conversa é sobre abertura de conta.

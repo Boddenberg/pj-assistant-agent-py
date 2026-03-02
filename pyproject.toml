@@ -59,7 +59,7 @@ dependencies = [
     "opentelemetry-sdk>=1.25.0",
     "opentelemetry-instrumentation-fastapi>=0.46b0",
     "structlog>=24.0.0",
-    "axiom-py>=1.0.0",
+    "axiom-py>=0.5.0",
 
     # --- Config & Utils ---
     # pydantic: validação de dados + serialização (modelos de domínio)

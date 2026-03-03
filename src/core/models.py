@@ -112,6 +112,22 @@ class ChatMessage(BaseModel):
     validated: bool | None = None                       # BFA validou? True/False/None
 
 
+class CollectedField(BaseModel):
+    """
+    Campo já coletado e validado em sessão anterior — enviado pelo BFA na retomada.
+
+    Usado quando o cliente interrompeu o onboarding e volta a continuar.
+    O BFA envia os campos já persistidos para que o agente retome de onde parou,
+    sem re-coletar dados que já foram validados.
+
+    Também serve para qualquer fluxo conversacional campo-a-campo que precise
+    de retomada (ex: atualização cadastral, solicitação de crédito).
+    """
+    key: str                                            # Nome do campo (ex: "cnpj", "email")
+    value: str                                          # Valor validado (ex: "19439335000139")
+    validated: bool = True                              # Se foi validado pelo BFA
+
+
 class AgentRequest(BaseModel):
     """
     Payload de entrada do agente.
@@ -129,12 +145,22 @@ class AgentRequest(BaseModel):
           ]
         }
 
+      Com retomada de dados (BFA envia campos já coletados):
+        {
+          "query": "Quero continuar abrindo minha conta",
+          "collected_data": [
+            { "key": "cnpj", "value": "19439335000139", "validated": true },
+            { "key": "razaoSocial", "value": "Toquinho Ltda", "validated": true }
+          ]
+        }
+
       Completo (BFA envia tudo):
         {
           "customer_id": "cust-001",
           "profile": { ... },
           "transactions": [ ... ],
           "history": [ ... ],
+          "collected_data": [ ... ],
           "query": "Qual minha situação financeira?"
         }
 
@@ -148,6 +174,9 @@ class AgentRequest(BaseModel):
         default_factory=list,
     )
     history: list[ChatMessage] = Field(                  # Histórico de conversa (até 5 turnos)
+        default_factory=list,
+    )
+    collected_data: list[CollectedField] = Field(        # Campos já coletados (retomada)
         default_factory=list,
     )
     validation_error: str = ""                            # Erro do BFA ao validar último campo
@@ -197,6 +226,8 @@ class AgentResponse(BaseModel):
     step: str | None = None                                    # Step atual do onboarding (BFA valida)
     field_value: str | None = None                             # Valor cru do campo (BFA valida)
     next_step: str | None = None                               # Próximo step a ser pedido
+    is_restart: bool = False                                   # True se cliente pediu para recomeçar (BFA deve limpar sessão)
+    max_retries_exceeded: bool = False                           # True se excedeu tentativas (BFA NÃO deve adicionar ao history)
     metadata: AgentMetadata = Field(default_factory=AgentMetadata)  # Observabilidade
     timestamp: str = Field(
         default_factory=lambda: datetime.utcnow().isoformat(),

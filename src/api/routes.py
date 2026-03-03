@@ -103,6 +103,7 @@ async def chat(request: AgentRequest) -> AgentResponse:
         query=request.query[:100] + ("..." if len(request.query) > 100 else ""),
         query_length=len(request.query),
         num_transactions=len(request.transactions),
+        num_collected_data=len(request.collected_data),
         segment=request.profile.segment if request.profile else "N/A",
         credit_score=request.profile.credit_score if request.profile else 0,
         request_body=request.model_dump(mode="json"),

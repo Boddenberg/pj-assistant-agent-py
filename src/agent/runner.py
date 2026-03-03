@@ -30,10 +30,8 @@ from src.agent.graph import agent_graph
 from src.agent.prompts import PLANNER_PROMPT
 from src.agent.onboarding import (
     determine_current_field,
-    build_onboarding_context,
+    build_onboarding_response,
     is_onboarding_intent,
-    FIELD_LABELS,
-    FIELD_PROMPTS,
 )
 from src.observability.metrics import estimate_cost
 from src.observability.logging import get_logger
@@ -98,11 +96,20 @@ async def run_agent(request: AgentRequest, original_query: str | None = None) ->
     ]
 
     onboarding_state = None
-    if is_onboarding_intent(onboarding_query, history_dicts):
+    # Detectar onboarding: via intent na query/history OU via collected_data (retomada)
+    has_collected_onboarding_data = bool(request.collected_data)
+    if is_onboarding_intent(onboarding_query, history_dicts) or has_collected_onboarding_data:
+        # Converter collected_data do request para list[dict]
+        collected_data_dicts = [
+            {"key": cd.key, "value": cd.value, "validated": cd.validated}
+            for cd in request.collected_data
+        ] if request.collected_data else None
+
         onboarding_state = determine_current_field(
             history_dicts,
             onboarding_query,
             validation_error=getattr(request, "validation_error", "") or "",
+            collected_data=collected_data_dicts,
         )
 
         logger.info(
@@ -111,32 +118,76 @@ async def run_agent(request: AgentRequest, original_query: str | None = None) ->
             step=onboarding_state.step.value,
             next_step=onboarding_state.next_step.value,
             collected_count=len(onboarding_state.collected),
+            collected_fields=list(onboarding_state.collected.keys()),
+            pre_seeded_from_collected_data=bool(collected_data_dicts),
             has_validation_error=onboarding_state.has_validation_error,
+            validation_error=onboarding_state.validation_error[:100] if onboarding_state.validation_error else "",
+            validation_error_source=onboarding_state.validation_error_source,
             is_complete=onboarding_state.is_complete,
+            is_restart=onboarding_state.is_restart,
             retry_count=onboarding_state.retry_count,
             max_retries_exceeded=onboarding_state.max_retries_exceeded,
         )
 
-        # Injetar contexto de onboarding no prompt para o LLM
-        onboarding_context = build_onboarding_context(onboarding_state)
-        context += f"\n\n{onboarding_context}"
+        # ─── RESPOSTA DETERMINÍSTICA (sem LLM) ────────────────────
+        # O onboarding usa respostas prontas para garantir:
+        #   1. Campo correto (sem hallucination do LLM)
+        #   2. Mensagens de erro específicas
+        #   3. Zero tokens / custo zero
+        #   4. Latência mínima
+        deterministic_answer = build_onboarding_response(onboarding_state)
 
-    # Construir instrução de onboarding explícita para o synthesizer
-    onboarding_synth_hint = ""
-    if onboarding_state and not onboarding_state.is_complete:
-        label = FIELD_LABELS.get(onboarding_state.next_step, onboarding_state.next_step.value)
-        prompt_text = FIELD_PROMPTS.get(onboarding_state.next_step, "")
-        onboarding_synth_hint = (
-            f"⚠️ ONBOARDING ATIVO — NÃO mude o campo pedido.\n"
-            f"O campo a pedir agora é: **{label}**\n"
-            f"Mensagem sugerida: \"{prompt_text}\"\n"
-            f"→ Peça SOMENTE **{label}**. NÃO peça nenhum outro campo."
-        )
-    elif onboarding_state and onboarding_state.is_complete:
-        onboarding_synth_hint = (
-            "⚠️ ONBOARDING COMPLETO — Parabenize o cliente e mostre o resumo dos dados coletados."
+        context_duration = (time.perf_counter() - context_start) * 1000
+
+        logger.info(
+            "📋 [RUNNER] ONBOARDING_DETERMINISTIC — Resposta gerada sem LLM",
+            customer_id=request.customer_id,
+            step=onboarding_state.step.value,
+            next_step=onboarding_state.next_step.value,
+            answer_length=len(deterministic_answer),
+            answer_preview=deterministic_answer[:150],
+            has_validation_error=onboarding_state.has_validation_error,
+            validation_error_source=onboarding_state.validation_error_source,
+            is_restart=onboarding_state.is_restart,
+            max_retries_exceeded=onboarding_state.max_retries_exceeded,
+            context_build_ms=round(context_duration, 2),
         )
 
+        from src.core.models import AgentMetadata
+
+        # Ajustar suggested_actions conforme o estado
+        if onboarding_state.max_retries_exceeded:
+            suggested_actions = ["Abrir conta novamente", "Falar com atendente"]
+        elif onboarding_state.is_restart:
+            suggested_actions = ["Continuar cadastro"]
+        elif onboarding_state.is_complete:
+            suggested_actions = ["Ver minha conta", "Fazer um PIX", "Conhecer produtos"]
+        else:
+            suggested_actions = ["Continuar cadastro", "Cancelar abertura"]
+
+        return AgentResponse(
+            customer_id=request.customer_id,
+            answer=deterministic_answer,
+            context="onboarding",
+            intent="open_account",
+            confidence=1.0,
+            suggested_actions=suggested_actions,
+            step=onboarding_state.step.value,
+            field_value=onboarding_state.field_value,
+            next_step=onboarding_state.next_step.value,
+            has_validation_error=onboarding_state.has_validation_error,
+            retry_count=onboarding_state.retry_count,
+            is_restart=onboarding_state.is_restart,
+            max_retries_exceeded=onboarding_state.max_retries_exceeded,
+            metadata=AgentMetadata(
+                reasoning=[],
+                sources=[],
+                tokens_used=0,
+                estimated_cost_usd=0.0,
+            ),
+        )
+
+    # ─── Fluxo normal (não-onboarding): usar LLM ──────────────────
     context_duration = (time.perf_counter() - context_start) * 1000
 
     logger.info(
@@ -170,7 +221,7 @@ async def run_agent(request: AgentRequest, original_query: str | None = None) ->
         "customer_id": request.customer_id,
         "tokens_in": 0,
         "tokens_out": 0,
-        "onboarding_synth_instruction": onboarding_synth_hint,
+        "onboarding_synth_instruction": "",
     }
 
     logger.info(
@@ -294,12 +345,6 @@ async def run_agent(request: AgentRequest, original_query: str | None = None) ->
     # ─── Passo 5: Empacotar resposta ──────────────────────────────
     from src.core.models import AgentMetadata
 
-    # Se for onboarding, enriquecer resposta com campos de controle
-    if onboarding_state:
-        context = "onboarding"
-        intent = "open_account"
-        suggested_actions = ["Continuar cadastro", "Cancelar abertura"]
-
     return AgentResponse(
         customer_id=request.customer_id,
         answer=answer,
@@ -307,9 +352,6 @@ async def run_agent(request: AgentRequest, original_query: str | None = None) ->
         intent=intent,
         confidence=confidence,
         suggested_actions=suggested_actions,
-        step=onboarding_state.step.value if onboarding_state else None,
-        field_value=onboarding_state.field_value if onboarding_state else None,
-        next_step=onboarding_state.next_step.value if onboarding_state else None,
         metadata=AgentMetadata(
             reasoning=result.get("steps", []),
             sources=result.get("sources", []),

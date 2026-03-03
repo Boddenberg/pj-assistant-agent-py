@@ -44,7 +44,10 @@ from src.observability.logging import get_logger
 logger = get_logger("onboarding")
 
 
-# Máximo de tentativas por campo antes de desistir
+# Máximo de tentativas por campo antes de desistir.
+# O cliente terá MAX_RETRIES tentativas reais antes de ser bloqueado.
+# Ex: MAX_RETRIES=3 → 3 tentativas (1ª + 2 retries) no inline path,
+#     ou 3 rejeições do BFA + 4ª tentativa bloqueada no BFA path.
 MAX_RETRIES = 3
 
 
@@ -193,69 +196,76 @@ def validate_field_format(field_enum: OnboardingField, value: str) -> str | None
         digits = _only_digits(value)
         if len(digits) != 14:
             return (
-                f"CNPJ inválido — deve conter **14 dígitos** numéricos.\n"
-                f"Você informou {len(digits)} dígito(s).\n"
-                f"Formato: XX.XXX.XXX/XXXX-XX"
+                f"O CNPJ deve conter **14 dígitos** numéricos, "
+                f"mas você informou {len(digits)} dígito(s).\n"
+                f"Exemplo: 12.345.678/0001-90"
             )
 
     elif field_enum == OnboardingField.RAZAO_SOCIAL:
         if len(value) < 3:
-            return "Razão Social deve ter no mínimo **3 caracteres**."
+            return "A Razão Social deve ter no mínimo **3 caracteres**. Tente novamente."
 
     elif field_enum == OnboardingField.NOME_FANTASIA:
         if len(value) < 2:
-            return "Nome Fantasia deve ter no mínimo **2 caracteres**."
+            return "O Nome Fantasia deve ter no mínimo **2 caracteres**. Tente novamente."
 
     elif field_enum == OnboardingField.EMAIL:
         if "@" not in value or "." not in value.split("@")[-1]:
             return (
-                "E-mail inválido — deve conter **@** e um domínio válido.\n"
+                "O e-mail informado parece inválido — precisa ter **@** e um domínio.\n"
                 "Exemplo: contato@suaempresa.com.br"
             )
 
     elif field_enum == OnboardingField.REPRESENTANTE_NAME:
         if len(value) < 5:
-            return "Nome do representante deve ter no mínimo **5 caracteres**."
+            return (
+                "O nome do representante deve ter no mínimo **5 caracteres**.\n"
+                "Informe o nome completo (nome e sobrenome)."
+            )
 
     elif field_enum == OnboardingField.REPRESENTANTE_CPF:
         digits = _only_digits(value)
         if len(digits) != 11:
             return (
-                f"CPF inválido — deve conter **11 dígitos** numéricos.\n"
-                f"Você informou {len(digits)} dígito(s).\n"
-                f"Formato: XXX.XXX.XXX-XX"
+                f"O CPF deve conter **11 dígitos** numéricos, "
+                f"mas você informou {len(digits)} dígito(s).\n"
+                f"Exemplo: 123.456.789-00"
             )
 
     elif field_enum == OnboardingField.REPRESENTANTE_PHONE:
         digits = _only_digits(value)
         if len(digits) < 10:
             return (
-                f"Telefone inválido — deve conter no mínimo **10 dígitos**.\n"
-                f"Você informou {len(digits)} dígito(s).\n"
-                f"Formato: (XX) XXXXX-XXXX"
+                f"O telefone deve conter no mínimo **10 dígitos** (DDD + número), "
+                f"mas você informou {len(digits)} dígito(s).\n"
+                f"Exemplo: (11) 98765-4321"
             )
 
     elif field_enum == OnboardingField.REPRESENTANTE_BIRTH_DATE:
         date_pattern = r"^\d{2}[/\-\.]\d{2}[/\-\.]\d{4}$"
         if not re.match(date_pattern, value):
             return (
-                "Data de nascimento inválida.\n"
-                "Use o formato: **DD/MM/AAAA**\n"
+                "A data de nascimento precisa estar no formato **DD/MM/AAAA**.\n"
                 "Exemplo: 15/03/1990"
             )
 
     elif field_enum == OnboardingField.PASSWORD:
         if not re.match(r"^\d{6}$", value):
+            if len(value) != 6:
+                return (
+                    f"A senha deve ter exatamente **6 dígitos**, "
+                    f"mas você informou {len(value)} caractere(s)."
+                )
             return (
-                "Senha inválida — deve ter exatamente **6 dígitos numéricos**.\n"
+                "A senha deve conter **apenas números** (6 dígitos).\n"
                 "Sem letras ou caracteres especiais."
             )
 
     elif field_enum == OnboardingField.PASSWORD_CONFIRMATION:
         if not re.match(r"^\d{6}$", value):
             return (
-                "Confirmação de senha inválida — deve ter exatamente "
-                "**6 dígitos numéricos**."
+                "A confirmação deve ter exatamente **6 dígitos numéricos**, "
+                "igual à senha que você criou."
             )
 
     return None
@@ -274,9 +284,11 @@ class OnboardingState:
     is_complete: bool = False
     has_validation_error: bool = False
     validation_error: str = ""
+    validation_error_source: str = ""   # "bfa" se veio do BFA, "inline" se validação local
     field_value: str = ""               # valor cru que o cliente enviou
     retry_count: int = 0                # quantas vezes errou o step atual
     max_retries_exceeded: bool = False   # se excedeu o limite de retries
+    is_restart: bool = False             # se o cliente pediu para recomeçar
 
 
 def _get_next_field(current: OnboardingField) -> OnboardingField:
@@ -291,38 +303,163 @@ def determine_current_field(
     history: list[dict],
     current_query: str,
     validation_error: str = "",
+    collected_data: list[dict] | None = None,
 ) -> OnboardingState:
     """
     Determina o estado do onboarding com base no history enriquecido.
 
     O BFA envia cada turno com step + validated. O agente:
-      1. Percorre o history para encontrar o último step validado
-      2. Determina o próximo step
-      3. Valida formato inline da query atual
-      4. Conta retries consecutivos no mesmo step
+      1. Pré-carrega collected_data (campos de sessão anterior, se houver)
+      2. Percorre o history para encontrar o último step validado
+      3. Determina o próximo step
+      4. Valida formato inline da query atual
+      5. Conta retries consecutivos no mesmo step
 
     Args:
         history: Turnos com {query, answer, step, validated}
         current_query: Mensagem atual do cliente
         validation_error: Erro do BFA se rejeitou o último campo
+        collected_data: Campos já coletados em sessão anterior (retomada).
+                        Lista de dicts com {key, value, validated}.
 
     Returns:
         OnboardingState completo
     """
     collected: dict[str, str] = {}
 
-    # ─── Sem history → primeira mensagem (welcome) ─────────────────
+    # ─── Pre-seed: campos de sessão anterior (collected_data) ──────
+    # O BFA pode enviar campos já validados de uma sessão anterior
+    # para que o onboarding retome de onde parou, sem re-coletar.
+    if collected_data:
+        for item in collected_data:
+            key = item.get("key", "")
+            value = item.get("value", "")
+            validated = item.get("validated", True)
+            if key and value and validated:
+                # Só aceitar se é um campo válido do onboarding
+                try:
+                    OnboardingField(key)
+                    collected[key] = value
+                except ValueError:
+                    logger.warning(
+                        "⚠️ [ONBOARDING] Unknown field in collected_data — ignoring",
+                        key=key,
+                    )
+
+        if collected:
+            logger.info(
+                "📋 [ONBOARDING] PRE-SEEDED from collected_data (session resumption)",
+                collected_count=len(collected),
+                collected_fields=list(collected.keys()),
+            )
+
+    # ─── Sem history → primeira mensagem ou retomada ───────────────
     if not history:
+        if collected:
+            # Retomada: temos campos pré-carregados, determinar o próximo
+            # Percorre apenas campos de dados (sem WELCOME e COMPLETED)
+            last_collected_step: OnboardingField | None = None
+            for fld in DATA_FIELDS:
+                if fld.value in collected:
+                    last_collected_step = fld
+                else:
+                    break
+
+            if last_collected_step:
+                next_step = _get_next_field(last_collected_step)
+                if next_step == OnboardingField.COMPLETED:
+                    return OnboardingState(
+                        step=OnboardingField.COMPLETED,
+                        next_step=OnboardingField.COMPLETED,
+                        collected=collected,
+                        is_complete=True,
+                        field_value=current_query,
+                    )
+                # A "step" aqui é o welcome pois é a primeira mensagem,
+                # mas o next_step avança para o próximo campo pendente.
+                logger.info(
+                    "🔄 [ONBOARDING] RESUMING — Retomando de sessão anterior",
+                    collected_count=len(collected),
+                    next_step=next_step.value,
+                )
+                return OnboardingState(
+                    step=OnboardingField.WELCOME,
+                    next_step=next_step,
+                    collected=collected,
+                    field_value=current_query,
+                )
+
         return OnboardingState(
             step=OnboardingField.WELCOME,
             next_step=OnboardingField.WELCOME,
             field_value=current_query,
         )
 
+    # ─── Restart: cliente pediu para recomeçar ─────────────────────
+    # IMPORTANTE: Verificar restart ANTES de qualquer retry/max_retries check.
+    # Isso evita que o cliente fique preso em loop quando erra muitas vezes
+    # e tenta recomeçar com "abrir conta".
+    # O BFA deve limpar a sessão ao receber step=welcome + is_restart=True.
+    if _is_restart_request(current_query):
+        has_previous_onboarding = any(
+            turn.get("step") is not None for turn in history
+        )
+        if has_previous_onboarding:
+            logger.info(
+                "🔄 [ONBOARDING] RESTART — Cliente pediu para recomeçar o onboarding",
+                query=current_query,
+            )
+            return OnboardingState(
+                step=OnboardingField.WELCOME,
+                next_step=OnboardingField.WELCOME,
+                field_value=current_query,
+                is_restart=True,
+            )
+
+    # ─── Detectar max_retries anterior ────────────────────────────
+    # Se o último answer no history indica max_retries (contém "após algumas
+    # tentativas" ou "não conseguimos validar"), qualquer nova mensagem é
+    # tratada como restart — o max_retries JÁ encerrou o fluxo.
+    # O cliente que volta a escrever quer continuar.
+    #
+    # Também detecta se o BFA marcou max_retries_exceeded=True no último turno
+    # (caso o BFA tenha adicionado ao history mesmo sem dever).
+    if history:
+        last_turn = history[-1]
+        last_answer = last_turn.get("answer", "")
+        max_retries_phrases = [
+            "após algumas tentativas",
+            "não conseguimos validar",
+            "limite de tentativas",
+            "recomeçamos",            # new message format
+            "é só me enviar",         # new message format
+        ]
+        is_post_max_retries = any(
+            phrase in last_answer.lower() for phrase in max_retries_phrases
+        )
+
+        # Fallback: se o BFA adicionou max_retries_exceeded ao turno
+        if not is_post_max_retries and last_turn.get("max_retries_exceeded"):
+            is_post_max_retries = True
+
+        if is_post_max_retries:
+            logger.info(
+                "🔄 [ONBOARDING] RESTART (post max_retries) — Reiniciando após max retries",
+                query=current_query,
+                last_answer_preview=last_answer[:100],
+            )
+            return OnboardingState(
+                step=OnboardingField.WELCOME,
+                next_step=OnboardingField.WELCOME,
+                field_value=current_query,
+                is_restart=True,
+            )
+
     # ─── Percorrer o history para encontrar o estado ───────────────
     # Estratégia: identificar o último step VALIDADO pelo BFA.
     # O próximo step é o seguinte na sequência.
     last_validated_step: OnboardingField | None = None
+    last_rejected_step: OnboardingField | None = None
     retry_count = 0
 
     for turn in history:
@@ -343,8 +480,12 @@ def determine_current_field(
             last_validated_step = step_enum
             collected[step_enum.value] = turn["query"]
             retry_count = 0  # resetar contagem ao validar
+            last_rejected_step = None  # resetar rejeição
         elif validated is False:
+            # Só contar rejeições do step ATUAL (step seguinte ao último validado).
+            # Rejeições de steps anteriores já foram resolvidas.
             retry_count += 1
+            last_rejected_step = step_enum
 
     # ─── Determinar o step que o cliente está respondendo AGORA ────
     if last_validated_step is None:
@@ -352,6 +493,15 @@ def determine_current_field(
         current_step = OnboardingField.CNPJ
     else:
         current_step = _get_next_field(last_validated_step)
+
+    logger.debug(
+        "📋 [ONBOARDING] HISTORY_TRAVERSED",
+        last_validated_step=last_validated_step.value if last_validated_step else None,
+        current_step=current_step.value,
+        retry_count_from_history=retry_count,
+        collected_count=len(collected),
+        current_query_preview=current_query[:30],
+    )
 
     # Se já completou todos os campos
     if current_step == OnboardingField.COMPLETED:
@@ -363,13 +513,56 @@ def determine_current_field(
             field_value=current_query,
         )
 
+    # ─── Fallback: BFA rejeitou (validated=false) sem validation_error ─
+    # Se o último turno do history tem validated=false e o BFA NÃO enviou
+    # validation_error (string vazia), gerar uma mensagem genérica
+    # contextual ao campo — para que a resposta não pareça "chumbada".
+    if not validation_error and last_rejected_step is not None:
+        label = FIELD_LABELS.get(current_step, current_step.value)
+        validation_error = (
+            f"O **{label}** informado não foi aceito pelo sistema. "
+            f"Verifique o dado e tente novamente."
+        )
+        logger.info(
+            "⚠️ [ONBOARDING] BFA rejected without error message — using fallback",
+            step=current_step.value,
+            last_rejected_step=last_rejected_step.value,
+            retry_count=retry_count,
+        )
+
     # ─── Verificar limite de retries ───────────────────────────────
-    # Se o BFA retornou validated=False no último turno, contar como retry.
-    # Se já mandou validation_error, é mais um retry.
-    if validation_error:
-        retry_count += 1
+    # retry_count já contém todas as tentativas falhadas do history.
+    # validation_error indica que o BFA rejeitou a última tentativa —
+    # mas essa rejeição já está contada como validated=False no history.
+    # NÃO incrementar novamente para evitar double-counting.
+
+    logger.debug(
+        "📋 [ONBOARDING] RETRY_CHECK",
+        step=current_step.value,
+        retry_count=retry_count,
+        max_retries=MAX_RETRIES,
+        has_validation_error=bool(validation_error),
+        has_last_rejected_step=last_rejected_step is not None,
+    )
 
     if retry_count >= MAX_RETRIES:
+        # Safety net: se mesmo depois de todos os checks anteriores
+        # ainda chegou aqui com um pedido de restart, forçar restart
+        # para não prender o cliente em loop infinito.
+        if _is_restart_request(current_query):
+            logger.info(
+                "🔄 [ONBOARDING] RESTART (safety net in max_retries) — Forçando restart",
+                step=current_step.value,
+                retry_count=retry_count,
+                query=current_query,
+            )
+            return OnboardingState(
+                step=OnboardingField.WELCOME,
+                next_step=OnboardingField.WELCOME,
+                field_value=current_query,
+                is_restart=True,
+            )
+
         logger.info(
             "🚫 [ONBOARDING] Max retries exceeded",
             step=current_step.value,
@@ -382,6 +575,7 @@ def determine_current_field(
             collected=collected,
             has_validation_error=True,
             validation_error=validation_error or "Limite de tentativas excedido",
+            validation_error_source="bfa" if validation_error else "inline",
             field_value=current_query,
             retry_count=retry_count,
             max_retries_exceeded=True,
@@ -395,6 +589,7 @@ def determine_current_field(
             collected=collected,
             has_validation_error=True,
             validation_error=validation_error,
+            validation_error_source="bfa",
             field_value=current_query,
             retry_count=retry_count,
         )
@@ -408,7 +603,10 @@ def determine_current_field(
             "⚠️ [ONBOARDING] Inline validation failed",
             step=current_step.value,
             value_preview=current_query[:20],
-            retry_count=retry_count,
+            error_preview=format_error[:80],
+            retry_count_after_increment=retry_count,
+            max_retries=MAX_RETRIES,
+            will_exceed_max=retry_count >= MAX_RETRIES,
         )
 
         if retry_count >= MAX_RETRIES:
@@ -418,6 +616,7 @@ def determine_current_field(
                 collected=collected,
                 has_validation_error=True,
                 validation_error=format_error,
+                validation_error_source="inline",
                 field_value=current_query,
                 retry_count=retry_count,
                 max_retries_exceeded=True,
@@ -429,6 +628,7 @@ def determine_current_field(
             collected=collected,
             has_validation_error=True,
             validation_error=format_error,
+            validation_error_source="inline",
             field_value=current_query,
             retry_count=retry_count,
         )
@@ -471,16 +671,19 @@ def build_onboarding_response(state: OnboardingState) -> str:
     if state.max_retries_exceeded:
         label = FIELD_LABELS.get(state.step, state.step.value)
         return (
-            f"Não conseguimos validar o **{label}** após algumas tentativas. 😕\n\n"
-            "Quando estiver com os dados em mãos para a abertura de conta, "
-            "estaremos por aqui! 😊\n\n"
-            "É só digitar **\"abrir conta\"** para recomeçar."
+            f"Não conseguimos validar o **{label}** após {MAX_RETRIES} tentativas. 😕\n\n"
+            "Mas sem problemas! Quando estiver com os dados corretos em mãos, "
+            "é só me enviar qualquer mensagem e recomeçamos. 😊"
         )
+
+    # ─── Restart → recomeçar com welcome ───────────────────────────
+    if state.is_restart:
+        return FIELD_PROMPTS[OnboardingField.WELCOME]
 
     # ─── Onboarding completo ──────────────────────────────────────
     if state.is_complete:
-        lines = ["Todos os dados foram recebidos! ✅🎉\n"]
-        lines.append("Confira o resumo do cadastro:\n")
+        lines = ["Parabéns! 🎉 Sua conta PJ foi aberta com sucesso!\n"]
+        lines.append("Aqui está o resumo do cadastro:\n")
         for fld in DATA_FIELDS:
             if fld in (OnboardingField.PASSWORD, OnboardingField.PASSWORD_CONFIRMATION):
                 continue
@@ -489,19 +692,89 @@ def build_onboarding_response(state: OnboardingState) -> str:
             lines.append(f"- **{label}**: {value}")
         lines.append(
             "\nSeu cadastro será processado e em breve sua conta "
-            "PJ estará pronta! 🚀"
+            "PJ estará pronta! 🚀\n\n"
+            "Se precisar de mais alguma coisa, é só avisar! 😊"
         )
+        return "\n".join(lines)
+
+    # ─── Retomada de sessão (welcome com collected_data) ───────────
+    # Se step é welcome, tem campos coletados, e o next_step NÃO é welcome,
+    # significa que estamos retomando de uma sessão anterior.
+    if (
+        state.step == OnboardingField.WELCOME
+        and state.collected
+        and state.next_step != OnboardingField.WELCOME
+    ):
+        lines = [
+            "Que bom que voltou! 😊 Vi que já temos alguns dados do seu cadastro anterior.\n"
+        ]
+        lines.append("**Dados já coletados:**")
+        for fld in DATA_FIELDS:
+            if fld.value in state.collected:
+                label = FIELD_LABELS.get(fld, fld.value)
+                # Mascarar valores sensíveis no resumo
+                value = state.collected[fld.value]
+                if fld == OnboardingField.REPRESENTANTE_CPF:
+                    value = value[:3] + ".***.***-" + value[-2:] if len(value) >= 5 else "***"
+                elif fld == OnboardingField.EMAIL:
+                    parts = value.split("@")
+                    if len(parts) == 2:
+                        value = parts[0][:2] + "***@" + parts[1]
+                lines.append(f"  ✅ {label}: {value}")
+
+        lines.append("")  # linha em branco
+
+        # Pedir o próximo campo pendente
+        next_prompt = FIELD_PROMPTS.get(state.next_step, "")
+        if next_prompt:
+            # Remover confirmação do campo anterior (ex: "CNPJ recebido! ✅\n\n")
+            # e substituir por mensagem de retomada
+            label = FIELD_LABELS.get(state.next_step, state.next_step.value)
+            hint = FIELD_FORMAT_HINTS.get(state.next_step, "")
+            lines.append(f"Vamos continuar de onde paramos! Agora preciso do **{label}**.")
+            if hint:
+                lines.append(f"{hint}")
+        else:
+            label = FIELD_LABELS.get(state.next_step, state.next_step.value)
+            lines.append(f"Vamos continuar! Agora preciso do **{label}**.")
+
         return "\n".join(lines)
 
     # ─── Erro de validação → pedir de novo ─────────────────────────
     if state.has_validation_error:
         label = FIELD_LABELS.get(state.next_step, state.next_step.value)
         hint = FIELD_FORMAT_HINTS.get(state.next_step, "")
-        lines = [f"⚠️ O dado informado para **{label}** não está válido."]
-        lines.append(f"Motivo: {state.validation_error}")
-        if hint:
-            lines.append(f"\n{hint}")
-        lines.append(f"\nPor favor, informe o **{label}** novamente.")
+        error_msg = state.validation_error
+        remaining = MAX_RETRIES - state.retry_count
+
+        # Se o erro veio do BFA (validation_error_source == "bfa"),
+        # adaptar para tom humano se for mensagem técnica.
+        if state.validation_error_source == "bfa" and error_msg:
+            # Adapta mensagens técnicas para tom humano
+            msg = error_msg
+            # Exemplo: "já está cadastrado no sistema" → mais amigável
+            if "já está cadastrado" in msg:
+                msg = f"O {label} informado já está cadastrado. Por favor, informe outro {label.lower()}."
+            elif "inválido" in msg:
+                msg = f"O {label} informado não foi aceito. Verifique o dado e tente novamente."
+            elif "não confere" in msg or "não corresponde" in msg:
+                msg = f"A confirmação não corresponde ao valor informado. Tente novamente."
+            # Se não bater nenhum padrão, mantém o texto original
+            lines = [f"⚠️ {msg}"]
+            if hint:
+                lines.append(f"\n💡 {hint}")
+            if remaining <= 2:
+                lines.append(f"\n⏳ Você ainda tem **{remaining}** tentativa(s).")
+            lines.append(f"\nPor favor, informe o **{label}** novamente:")
+            return "\n".join(lines)
+
+        # Erro da validação inline (formato)
+        lines = [f"⚠️ {error_msg}"]
+        if hint and hint not in error_msg:
+            lines.append(f"\n💡 {hint}")
+        if remaining <= 2:
+            lines.append(f"\n⏳ Você ainda tem **{remaining}** tentativa(s).")
+        lines.append(f"\nPor favor, informe o **{label}** novamente:")
         return "\n".join(lines)
 
     # ─── Campo normal → usar template ─────────────────────────────
@@ -568,7 +841,10 @@ def build_onboarding_context(state: OnboardingState) -> str:
         label = FIELD_LABELS.get(state.next_step, state.next_step.value)
         hint = FIELD_FORMAT_HINTS.get(state.next_step, "")
         lines.append(f"\n### ⚠️ Dado rejeitado: {label}")
-        lines.append(f"Erro: {state.validation_error}")
+        if state.validation_error_source == "bfa":
+            lines.append(f"Erro do sistema bancário: {state.validation_error}")
+        else:
+            lines.append(f"Erro de formato: {state.validation_error}")
         if hint:
             lines.append(f"Formato esperado: {hint}")
         lines.append(f"\n→ AÇÃO OBRIGATÓRIA: Peça SOMENTE o campo **{label}**.")
@@ -588,6 +864,24 @@ def build_onboarding_context(state: OnboardingState) -> str:
 # =============================================================================
 # Detecção de intenção de onboarding
 # =============================================================================
+
+def _is_restart_request(query: str) -> bool:
+    """
+    Detecta se o cliente está pedindo para recomeçar o onboarding.
+
+    Usado quando o fluxo anterior foi encerrado por max retries
+    e o cliente digita "abrir conta" para recomeçar.
+    """
+    restart_keywords = [
+        "abrir conta", "abertura", "criar conta", "nova conta",
+        "quero conta", "abrir uma conta", "abrir minha conta",
+        "recomeçar", "começar de novo", "reiniciar",
+        "tentar de novo", "tentar novamente",
+        "quero tentar", "vamos tentar",
+    ]
+    query_lower = query.lower().strip()
+    return any(kw in query_lower for kw in restart_keywords)
+
 
 def is_onboarding_intent(query: str, history: list[dict]) -> bool:
     """

@@ -1,7 +1,7 @@
 """
-Modelos de domínio — contratos de entrada e saída do agente.
+Contratos de entrada e saída — interface com o BFA (Go).
 
-Todos os dados que trafegam no sistema têm um modelo Pydantic.
+Todos os dados que trafegam entre BFA ↔ Agente são definidos aqui.
 Isso garante:
   - Validação automática (se o BFA mandar lixo, falha cedo)
   - Serialização/deserialização JSON consistente
@@ -14,80 +14,11 @@ Fluxo dos dados:
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
 from pydantic import BaseModel, Field
 
+from src.core.models.customer import CustomerProfile, Transaction
+from src.core.models.agent import AgentMetadata
 
-# =============================================================================
-# Modelos do Cliente — vêm do BFA (Profile API + Transactions API)
-# =============================================================================
-
-class CustomerProfile(BaseModel):
-    """
-    Perfil do cliente PJ — enviado pelo BFA após consultar a Profile API.
-
-    Esses dados são usados pelo agente para:
-      - Avaliar risco de crédito (credit_score)
-      - Personalizar recomendações (segment, revenue_range)
-      - Contextualizar o histórico (account_since)
-    """
-    customer_id: str                # ID único do cliente no sistema
-    company_name: str               # Razão social da empresa
-    segment: str = ""               # Segmento: "Médias Empresas", "Grandes Empresas", etc.
-    revenue_range: str = ""         # Faixa de faturamento: "R$ 1M - R$ 10M"
-    account_since: str = ""         # Data de abertura da conta
-    credit_score: int = 0           # Score de crédito (0-1000)
-
-
-class Transaction(BaseModel):
-    """
-    Transação financeira — enviada pelo BFA após consultar a Transactions API.
-
-    Cada transação representa uma movimentação na conta do cliente.
-    Valores negativos = saídas (pagamentos). Positivos = entradas (recebimentos).
-    """
-    id: str                         # ID único da transação
-    date: str                       # Data da transação (ISO 8601)
-    amount: float                   # Valor em reais (negativo = saída)
-    category: str                   # Categoria: "Fornecedores", "Vendas", "Folha", etc.
-    description: str = ""           # Descrição livre da transação
-
-
-# =============================================================================
-# Modelos do Agente — controle interno do workflow
-# =============================================================================
-
-class StepType(str, Enum):
-    """
-    Tipos de passos que o agente pode executar.
-
-    Cada passo é registrado para rastreabilidade (reasoning).
-    O BFA e o front podem exibir esses passos ao usuário.
-    """
-    PLAN = "plan"                   # Planejamento: decidir o que fazer
-    RETRIEVE = "retrieve"           # Busca RAG: consultar base de conhecimento
-    TOOL_CALL = "tool_call"         # Execução de tool: analisar dados
-    SYNTHESIZE = "synthesize"       # Síntese: gerar resposta final
-
-
-class AgentStep(BaseModel):
-    """
-    Registro de um passo executado pelo agente.
-
-    Esses registros formam o "reasoning" — a justificativa estruturada
-    de como o agente chegou à resposta. Útil para:
-      - Auditoria (por que o agente disse X?)
-      - Debug (qual passo demorou mais?)
-      - Transparência (mostrar ao cliente o raciocínio)
-    """
-    step: StepType                  # Tipo do passo
-    detail: str                     # Descrição do que foi feito
-    duration_ms: float = 0.0        # Tempo gasto nesse passo (ms)
-
-
-# =============================================================================
-# Contratos de Entrada/Saída — interface com o BFA
-# =============================================================================
 
 class ChatMessage(BaseModel):
     """
@@ -180,19 +111,6 @@ class AgentRequest(BaseModel):
         default_factory=list,
     )
     validation_error: str = ""                            # Erro do BFA ao validar último campo
-
-
-class AgentMetadata(BaseModel):
-    """
-    Metadados de observabilidade — NÃO usados para decisão do BFA.
-
-    Servem para monitoramento, debug e auditoria.
-    O BFA pode logar/encaminhar para dashboards, mas não usa para routing.
-    """
-    reasoning: list[AgentStep] = Field(default_factory=list)   # Passos executados
-    sources: list[str] = Field(default_factory=list)           # Fontes RAG consultadas
-    tokens_used: int = 0                                       # Total tokens consumidos
-    estimated_cost_usd: float = 0.0                            # Custo estimado USD
 
 
 class AgentResponse(BaseModel):

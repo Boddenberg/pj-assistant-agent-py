@@ -146,6 +146,10 @@ class AgentResponse(BaseModel):
     next_step: str | None = None                               # Próximo step a ser pedido
     is_restart: bool = False                                   # True se cliente pediu para recomeçar (BFA deve limpar sessão)
     max_retries_exceeded: bool = False                           # True se excedeu tentativas (BFA NÃO deve adicionar ao history)
+    rag_contexts: list[str] = Field(                              # Chunks RAG usados na resposta
+        default_factory=list,                                     # BFA deve persistir e enviar no /v1/evaluate
+        description="Chunks da knowledge base usados para gerar a resposta",
+    )
     metadata: AgentMetadata = Field(default_factory=AgentMetadata)  # Observabilidade
     timestamp: str = Field(
         default_factory=lambda: datetime.utcnow().isoformat(),

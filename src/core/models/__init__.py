@@ -27,3 +27,12 @@ from src.core.models.contracts import (  # noqa: F401
     AgentRequest,
     AgentResponse,
 )
+
+from src.core.models.evaluation import (  # noqa: F401
+    Verdict,
+    ConversationTurn,
+    EvaluationRequest,
+    EvaluationResponse,
+    EvaluationMetadata,
+    CriterionResult,
+)

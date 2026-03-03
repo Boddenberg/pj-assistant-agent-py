@@ -2,10 +2,5 @@ Context: atualização cadastro
 
 # Atualização de Cadastro
 
-Dados que o cliente pode alterar (requer autenticação):
+Infelizmente atualização de cadastro não pode ser feita via chat, por enquanto.
 
-**Perfil da empresa:**
-- CNPJ (`cnpj`)
-- Razão Social (`razao_social`)
-- Nome fantasia (`nomeFantasia`)
-- E-mail (`email`)

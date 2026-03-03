@@ -175,8 +175,6 @@ async def run_agent(request: AgentRequest, original_query: str | None = None) ->
             step=onboarding_state.step.value,
             field_value=onboarding_state.field_value,
             next_step=onboarding_state.next_step.value,
-            has_validation_error=onboarding_state.has_validation_error,
-            retry_count=onboarding_state.retry_count,
             is_restart=onboarding_state.is_restart,
             max_retries_exceeded=onboarding_state.max_retries_exceeded,
             metadata=AgentMetadata(
@@ -345,6 +343,26 @@ async def run_agent(request: AgentRequest, original_query: str | None = None) ->
     # ─── Passo 5: Empacotar resposta ──────────────────────────────
     from src.core.models import AgentMetadata
 
+    # ─── Extrair chunks RAG das ToolMessages ──────────────────
+    # Os chunks retornados pelo search_knowledge_base ficam nas ToolMessages.
+    # Extraímos para devolver ao BFA no campo rag_contexts.
+    # O BFA persiste e reenvia no POST /v1/evaluate para o judge avaliar.
+    from langchain_core.messages import ToolMessage as _ToolMessage
+    rag_contexts: list[str] = []
+    for msg in result.get("messages", []):
+        if (
+            isinstance(msg, _ToolMessage)
+            and getattr(msg, "name", "") == "search_knowledge_base"
+            and msg.content
+            and msg.content != "Nenhum documento relevante encontrado na base de conhecimento."
+        ):
+            # Cada chunk separado por \n---\n no retorno da tool
+            for chunk in msg.content.split("\n---\n"):
+                # Remover prefixo [relevância=X.XX] se presente
+                clean = re.sub(r"^\[relevância=[\d.]+\]\s*", "", chunk.strip())
+                if clean:
+                    rag_contexts.append(clean)
+
     return AgentResponse(
         customer_id=request.customer_id,
         answer=answer,
@@ -352,6 +370,7 @@ async def run_agent(request: AgentRequest, original_query: str | None = None) ->
         intent=intent,
         confidence=confidence,
         suggested_actions=suggested_actions,
+        rag_contexts=rag_contexts,
         metadata=AgentMetadata(
             reasoning=result.get("steps", []),
             sources=result.get("sources", []),

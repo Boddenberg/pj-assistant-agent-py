@@ -79,10 +79,6 @@ Cliente ──► BFA (Go) ──► Agente Python ──► BFA (Go) ──► 
   "step": "string | null",
   "field_value": "string | null",
   "next_step": "string | null",
-  "has_validation_error": false,
-  "retry_count": 0,
-  "is_restart": false,
-  "max_retries_exceeded": false,
   "suggested_actions": ["string"],
   "metadata": { ... },
   "timestamp": "string"
@@ -96,8 +92,6 @@ Cliente ──► BFA (Go) ──► Agente Python ──► BFA (Go) ──► 
 | `step` | `!= null` | É onboarding. Usar esse valor para saber QUAL campo validar |
 | `field_value` | `!= null` | Valor cru que o cliente digitou. Validar no BFA |
 | `next_step` | `!= null` | Próximo campo que será pedido (informativo) |
-| `has_validation_error` | `== true` | ⚠️ **CRÍTICO**: Agente JÁ rejeitou o campo (formato inválido). NÃO validar no BFA. Adicionar ao history com `validated: false`. Enviar `answer` direto ao cliente. |
-| `retry_count` | `> 0` | Quantas tentativas consecutivas falharam neste campo |
 | `answer` | Sempre | Texto para exibir ao cliente |
 | `context` | `== "onboarding"` | Indica que estamos no fluxo de abertura |
 | `step` | `== null` | NÃO é onboarding — tratar como conversa normal |

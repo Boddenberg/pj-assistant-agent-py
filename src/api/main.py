@@ -28,6 +28,7 @@ from fastapi import FastAPI
 from prometheus_client import make_asgi_app
 
 from src.api.routes import router
+from src.api.evaluation_routes import evaluation_router
 from src.core.config import settings
 from src.observability.logging import setup_logging, get_logger
 from src.observability.tracing import setup_tracing
@@ -116,6 +117,9 @@ app = FastAPI(
 # Inclui todas as rotas definidas em routes.py
 # O APIRouter é como um "mini-app" que agrupa endpoints
 app.include_router(router)
+
+# Rotas de avaliação (LLM-as-Judge) — apartadas das rotas do agente
+app.include_router(evaluation_router)
 
 
 # =============================================================================

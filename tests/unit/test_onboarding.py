@@ -1006,6 +1006,32 @@ class TestIsOnboardingIntent:
         """Sem histórico e query neutra → não é onboarding."""
         assert is_onboarding_intent("Bom dia", []) is False
 
+    # ── Negação: NÃO deve ativar onboarding ────────────────────────
+    @pytest.mark.parametrize("query", [
+        "não quero abrir conta",
+        "não quero abrir conta pj",
+        "Não quero criar conta",
+        "nao quero abrir conta",
+        "não preciso de conta",
+        "não preciso abrir conta",
+        "não vou abrir conta",
+        "sem interesse em abrir conta",
+        "cancelar abertura",
+        "desistir da conta",
+        "não quero mais abrir conta",
+    ])
+    def test_negation_does_not_trigger_onboarding(self, query):
+        """Frases com negação NÃO devem ativar onboarding."""
+        assert is_onboarding_intent(query, []) is False
+
+    def test_negation_ignored_when_history_has_step(self):
+        """Se history já tem step, negação é irrelevante (onboarding em andamento)."""
+        history = [
+            {"query": "12345678000199", "answer": "ok", "step": "cnpj", "validated": True},
+        ]
+        # Mesmo com negação na query, o history com step prevalece
+        assert is_onboarding_intent("não quero abrir conta", history) is True
+
 
 # =============================================================================
 # TestOnboardingState — dataclass

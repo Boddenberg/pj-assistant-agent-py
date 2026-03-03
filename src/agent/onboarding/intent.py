@@ -8,6 +8,44 @@ Duas funções:
 
 from __future__ import annotations
 
+# ─── Padrões de negação ─────────────────────────────────────────────
+# Frases que indicam que o cliente NÃO quer abrir conta.
+# Se qualquer uma aparecer na query, is_onboarding_intent retorna False.
+NEGATION_PATTERNS: list[str] = [
+    "não quero abrir",
+    "nao quero abrir",
+    "não quero criar",
+    "nao quero criar",
+    "não quero conta",
+    "nao quero conta",
+    "não quero abrir conta",
+    "nao quero abrir conta",
+    "não preciso de conta",
+    "nao preciso de conta",
+    "não preciso abrir",
+    "nao preciso abrir",
+    "não vou abrir",
+    "nao vou abrir",
+    "sem interesse em abrir",
+    "sem interesse em conta",
+    "cancelar abertura",
+    "desistir da conta",
+    "desistir de abrir",
+    "não quero mais abrir",
+    "nao quero mais abrir",
+]
+
+
+def _has_negation(query: str) -> bool:
+    """
+    Detecta se a query contém negação de abertura de conta.
+
+    Evita que "não quero abrir conta" ative o onboarding.
+    Precisa rodar ANTES da detecção de keywords positivas.
+    """
+    query_lower = query.lower().strip()
+    return any(neg in query_lower for neg in NEGATION_PATTERNS)
+
 
 def _is_restart_request(query: str) -> bool:
     """
@@ -59,4 +97,10 @@ def is_onboarding_intent(query: str, history: list[dict]) -> bool:
         "quero conta", "abrir uma conta", "abrir minha conta",
     ]
     query_lower = query.lower()
+
+    # Checar negação ANTES das keywords positivas
+    # "não quero abrir conta" contém "abrir conta" mas a intenção é NÃO abrir
+    if _has_negation(query_lower):
+        return False
+
     return any(kw in query_lower for kw in onboarding_keywords_query)

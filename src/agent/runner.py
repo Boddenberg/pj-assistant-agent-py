@@ -33,6 +33,9 @@ from src.agent.onboarding import (
     build_onboarding_response,
     is_onboarding_intent,
 )
+from src.agent.financial_formatter import format_financial_context
+from src.agent.auth_guard import requires_auth, build_auth_redirect
+from src.agent.context_resolver import needs_financial_context, build_context_request
 from src.observability.metrics import estimate_cost
 from src.observability.logging import get_logger
 
@@ -58,7 +61,39 @@ async def run_agent(request: AgentRequest, original_query: str | None = None) ->
     # O onboarding PRECISA do dado real para validar CNPJ, CPF, etc.
     # A máscara PII é só para o texto enviado ao LLM.
     onboarding_query = original_query or request.query
+    # ─── Auth Guard: bloquear funcionalidades de app para não autenticados ──
+    # Se o cliente não está logado e pergunta sobre PIX, saldo, cartão etc.,
+    # redireciona para abertura de conta de forma amigável.
+    if not request.is_authenticated and requires_auth(onboarding_query):
+        logger.info(
+            "🔒 [RUNNER] AUTH_GUARD — Cliente não autenticado tentou acessar funcionalidade do app",
+            customer_id=request.customer_id,
+            query_preview=onboarding_query[:100],
+        )
+        return build_auth_redirect(onboarding_query, request.customer_id)
 
+    # ─── Two-Call Flow: solicitar contextos financeiros ao BFA ─────
+    # Se o cliente está autenticado, a query precisa de dados financeiros,
+    # mas o BFA ainda NÃO enviou financial_context → é a 1ª chamada.
+    # Retornamos required_contexts para o BFA buscar no Supabase.
+    # Na 2ª chamada, o BFA reenvia com financial_context preenchido.
+    if (
+        request.is_authenticated
+        and request.financial_context is None
+        and needs_financial_context(onboarding_query)
+    ):
+        logger.info(
+            "📡 [RUNNER] CONTEXT_REQUEST — 1ª chamada: solicitando contextos ao BFA",
+            customer_id=request.customer_id,
+            query_preview=onboarding_query[:100],
+        )
+        response = build_context_request(onboarding_query, request.customer_id)
+        logger.info(
+            "📡 [RUNNER] CONTEXT_REQUEST_SENT — Contextos solicitados ao BFA",
+            customer_id=request.customer_id,
+            required_contexts=response.required_contexts,
+        )
+        return response
     # ─── Passo 1: Montar o contexto inicial ────────────────────────
     context_start = time.perf_counter()
 
@@ -69,6 +104,8 @@ async def run_agent(request: AgentRequest, original_query: str | None = None) ->
         profile=profile_json,
         has_transactions=bool(request.transactions),
         query=request.query,
+        is_authenticated=request.is_authenticated,
+        financial_context=format_financial_context(request.financial_context),
     )
 
     if request.transactions:

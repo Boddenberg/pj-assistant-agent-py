@@ -251,7 +251,9 @@ def synthesizer_node(state: AgentState) -> dict:
         "REGRA CRÍTICA DE ONBOARDING: Se a instrução de onboarding pediu um campo específico "
         "(ex: E-mail, CNPJ, CPF, Telefone), você DEVE pedir EXATAMENTE esse campo. "
         "NÃO troque por outro campo. NÃO pule etapas. NÃO peça mais de um campo por vez. "
-        "Confie na instrução de onboarding — ela controla a sequência."
+        "Confie na instrução de onboarding — ela controla a sequência. "
+        "OBRIGATÓRIO: Na ÚLTIMA LINHA, inclua a tag META conforme definido no system prompt. "
+        "Exemplo: [META:{\"context\":null,\"intent\":\"check_balance\",\"confidence\":0.95,\"suggested_actions\":[\"Ver extrato\",\"Fazer PIX\"]}]"
     )
 
     # Se há instrução de onboarding explícita, adiciona ao synth_instruction

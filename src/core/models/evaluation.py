@@ -62,6 +62,10 @@ class ConversationTurn(BaseModel):
         default_factory=list,                             # Vazio = turno sem RAG (onboarding, etc.)
         description="Chunks da knowledge base usados para gerar a resposta",
     )
+    financial_context_keys: list[str] = Field(             # Sub-contextos financeiros disponíveis
+        default_factory=list,                             # Ex: ["account", "cards", "pix"]
+        description="Quais sub-contextos financeiros foram enviados ao agente neste turno",
+    )
 
 
 class EvaluationRequest(BaseModel):

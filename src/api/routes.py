@@ -96,9 +96,14 @@ async def chat(request: AgentRequest) -> AgentResponse:
     # ═══════════════════════════════════════════════════════════════
     # LOG: REQUEST RECEBIDA
     # ═══════════════════════════════════════════════════════════════
+    has_financial = request.financial_context is not None
+    call_phase = "2nd_call" if has_financial else "1st_call"
+
     logger.info(
         "📥 [1/6] REQUEST_RECEIVED — Nova requisição recebida",
         customer_id=request.customer_id,
+        call_phase=call_phase,
+        has_financial_context=has_financial,
         company_name=request.profile.company_name if request.profile else "N/A",
         query=request.query[:100] + ("..." if len(request.query) > 100 else ""),
         query_length=len(request.query),
@@ -106,7 +111,6 @@ async def chat(request: AgentRequest) -> AgentResponse:
         num_collected_data=len(request.collected_data),
         segment=request.profile.segment if request.profile else "N/A",
         credit_score=request.profile.credit_score if request.profile else 0,
-        request_body=request.model_dump(mode="json"),
     )
 
     # Cria um span OpenTelemetry para rastreamento distribuído.
@@ -198,10 +202,15 @@ async def chat(request: AgentRequest) -> AgentResponse:
             span.set_attribute("cost_usd", response.metadata.estimated_cost_usd)
             span.set_attribute("duration_s", round(duration, 3))
 
+            is_context_request = bool(response.required_contexts)
+
             logger.info(
                 "📤 [6/6] REQUEST_COMPLETED — Resposta enviada com sucesso",
                 customer_id=request.customer_id,
                 status="success",
+                call_phase=call_phase,
+                is_context_request=is_context_request,
+                required_contexts=response.required_contexts if is_context_request else None,
                 total_duration_s=round(duration, 3),
                 total_duration_ms=round(duration * 1000, 2),
                 tokens_used=response.metadata.tokens_used,
@@ -212,6 +221,14 @@ async def chat(request: AgentRequest) -> AgentResponse:
                 intent=response.intent,
                 confidence=response.confidence,
                 answer_preview=response.answer[:150] + ("..." if len(response.answer) > 150 else ""),
+            )
+
+            logger.info(
+                "🏦 BFA ↔ AGENT — Request & Response completos",
+                data={
+                    "request": request.model_dump(mode="json"),
+                    "response": response.model_dump(mode="json"),
+                },
             )
 
             return response

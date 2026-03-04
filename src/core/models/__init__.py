@@ -28,6 +28,24 @@ from src.core.models.contracts import (  # noqa: F401
     AgentResponse,
 )
 
+from src.core.models.financial import (  # noqa: F401
+    FinancialContext,
+    AccountContext,
+    CardsContext,
+    CardInfo,
+    CardInvoice,
+    PixContext,
+    PixKey,
+    PixTransfer,
+    PixScheduledTransfer,
+    BillingContext,
+    BillPayment,
+    DebitPurchase,
+    CompanyProfile,
+    TransactionItem,
+    TransactionsContext,
+)
+
 from src.core.models.evaluation import (  # noqa: F401
     Verdict,
     ConversationTurn,

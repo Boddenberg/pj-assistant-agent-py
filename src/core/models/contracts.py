@@ -7,8 +7,18 @@ Isso garante:
   - Serialização/deserialização JSON consistente
   - Documentação via OpenAPI (FastAPI gera docs automaticamente)
 
-Fluxo dos dados:
-  BFA (Go) → AgentRequest → [Agente] → AgentResponse → BFA (Go)
+Fluxo de duas chamadas (queries financeiras):
+  1ª) BFA → AgentRequest (sem financial_context)
+      [Agente identifica intenção]
+      → AgentResponse com required_contexts=["account","pix",...]
+
+  2ª) BFA busca no Supabase só os contextos pedidos
+      BFA → AgentRequest (com financial_context preenchido)
+      [Agente processa com dados reais]
+      → AgentResponse com answer + required_contexts=[]
+
+Fluxo de chamada única (queries sem dados financeiros):
+  BFA → AgentRequest → [Agente] → AgentResponse (required_contexts=[])
 """
 
 from __future__ import annotations
@@ -18,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from src.core.models.customer import CustomerProfile, Transaction
 from src.core.models.agent import AgentMetadata
+from src.core.models.financial import FinancialContext
 
 
 class ChatMessage(BaseModel):
@@ -110,7 +121,9 @@ class AgentRequest(BaseModel):
     collected_data: list[CollectedField] = Field(        # Campos já coletados (retomada)
         default_factory=list,
     )
+    is_authenticated: bool = False                          # Cliente logado? (BFA controla)
     validation_error: str = ""                            # Erro do BFA ao validar último campo
+    financial_context: FinancialContext | None = None      # Contexto financeiro (BFA enriquece)
 
 
 class AgentResponse(BaseModel):
@@ -122,6 +135,7 @@ class AgentResponse(BaseModel):
       - intent      → intenção classificada do cliente (open_account, check_balance, etc.)
       - confidence  → confiança da resposta (0.0-1.0). Abaixo de 0.5 = escalar para humano
       - suggested_actions → sugestões para o front renderizar como opções ao cliente
+      - required_contexts → contextos financeiros que o BFA deve buscar (fluxo 2 chamadas)
 
     Campos de ONBOARDING (BFA usa para saber o que validar):
       - step        → step atual que o cliente respondeu (ex: "cnpj"). BFA usa pra
@@ -141,6 +155,11 @@ class AgentResponse(BaseModel):
     intent: str | None = None                                  # Intenção classificada
     confidence: float = 1.0                                    # Confiança (0.0-1.0)
     suggested_actions: list[str] = Field(default_factory=list)  # Sugestões para o front
+    required_contexts: list[str] = Field(                       # Contextos que o BFA deve buscar
+        default_factory=list,                                   # Vazio = resposta final (não precisa 2ª chamada)
+        description="Contextos financeiros que o BFA deve buscar no Supabase. "
+                    "Valores: account, cards, pix, billing, profile, analytics.",
+    )
     step: str | None = None                                    # Step atual do onboarding (BFA valida)
     field_value: str | None = None                             # Valor cru do campo (BFA valida)
     next_step: str | None = None                               # Próximo step a ser pedido

@@ -1,14 +1,14 @@
 """
-Context Resolver — identifica quais contextos financeiros o BFA deve buscar.
+Context Resolver — identifica quais contextos financeiros são relevantes para a query.
 
-Fluxo de duas chamadas (BFA ↔ Agente):
-  1ª chamada: BFA envia query SEM financial_context
-              → Agente analisa e retorna required_contexts
-  2ª chamada: BFA busca só os contextos necessários no Supabase e reenvia
-              → Agente responde com os dados
+Fluxo de chamada única (1-call flow):
+  O BFA envia tudo em uma chamada só: query + financial_context preenchido.
+  O agente processa direto com os dados recebidos.
 
-Isso evita que o BFA busque todos os 6 contextos (account, cards, pix,
-billing, profile, analytics) em toda requisição — reduz latência e carga.
+  Este módulo ainda é útil para:
+  - Analytics: saber quais contextos a query demandaria
+  - Logging: registrar quais contextos estão presentes vs esperados
+  - Futuro: otimização de carga no BFA (buscar só o necessário)
 
 A resolução é determinística (keyword-based): zero tokens, zero custo.
 """

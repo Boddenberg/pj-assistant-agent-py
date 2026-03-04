@@ -5,10 +5,14 @@ Este módulo é a "porta de entrada" do agente.
 A API (routes.py) chama run_agent() e recebe AgentResponse.
 
 Responsabilidades:
-  1. Montar o contexto inicial (mensagem com dados do cliente)
+  1. Montar o contexto inicial (mensagem com dados do cliente + financeiro)
   2. Invocar o grafo LangGraph
   3. Extrair resposta e métricas do estado final
   4. Empacotar tudo em AgentResponse
+
+Fluxo: 1-call — o BFA envia tudo em uma única chamada
+  (query + financial_context + profile + transactions).
+  O agente processa e responde direto.
 
 Por que uma fachada?
   - Desacopla a API do grafo interno
@@ -35,7 +39,6 @@ from src.agent.onboarding import (
 )
 from src.agent.financial_formatter import format_financial_context
 from src.agent.auth_guard import requires_auth, build_auth_redirect
-from src.agent.context_resolver import needs_financial_context, build_context_request
 from src.observability.metrics import estimate_cost
 from src.observability.logging import get_logger
 
@@ -72,28 +75,20 @@ async def run_agent(request: AgentRequest, original_query: str | None = None) ->
         )
         return build_auth_redirect(onboarding_query, request.customer_id)
 
-    # ─── Two-Call Flow: solicitar contextos financeiros ao BFA ─────
-    # Se o cliente está autenticado, a query precisa de dados financeiros,
-    # mas o BFA ainda NÃO enviou financial_context → é a 1ª chamada.
-    # Retornamos required_contexts para o BFA buscar no Supabase.
-    # Na 2ª chamada, o BFA reenvia com financial_context preenchido.
-    if (
-        request.is_authenticated
-        and request.financial_context is None
-        and needs_financial_context(onboarding_query)
-    ):
+    # ─── Single-Call Flow ──────────────────────────────────────────
+    # O BFA agora envia tudo em 1 chamada (financial_context já preenchido).
+    # Não há mais 2-call flow — o agente processa direto com os dados recebidos.
+    if request.is_authenticated and request.financial_context:
         logger.info(
-            "📡 [RUNNER] CONTEXT_REQUEST — 1ª chamada: solicitando contextos ao BFA",
+            "📡 [RUNNER] FINANCIAL_CONTEXT_RECEIVED — Dados financeiros recebidos do BFA",
             customer_id=request.customer_id,
-            query_preview=onboarding_query[:100],
+            context_keys=request.financial_context.context_keys,
+            has_account=request.financial_context.account is not None,
+            has_cards=request.financial_context.cards is not None,
+            has_pix=request.financial_context.pix is not None,
+            has_billing=request.financial_context.billing is not None,
+            has_transactions=request.financial_context.transactions is not None,
         )
-        response = build_context_request(onboarding_query, request.customer_id)
-        logger.info(
-            "📡 [RUNNER] CONTEXT_REQUEST_SENT — Contextos solicitados ao BFA",
-            customer_id=request.customer_id,
-            required_contexts=response.required_contexts,
-        )
-        return response
     # ─── Passo 1: Montar o contexto inicial ────────────────────────
     context_start = time.perf_counter()
 

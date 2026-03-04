@@ -133,6 +133,8 @@ FIELD_LABELS: dict[OnboardingField, str] = {
     OnboardingField.REPRESENTANTE_CPF: "CPF do representante",
     OnboardingField.REPRESENTANTE_PHONE: "Telefone",
     OnboardingField.REPRESENTANTE_BIRTH_DATE: "Data de nascimento",
+    OnboardingField.PASSWORD: "Senha",
+    OnboardingField.PASSWORD_CONFIRMATION: "Confirmação de senha",
 }
 
 FIELD_FORMAT_HINTS: dict[OnboardingField, str] = {

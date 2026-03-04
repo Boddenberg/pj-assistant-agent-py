@@ -97,12 +97,10 @@ async def chat(request: AgentRequest) -> AgentResponse:
     # LOG: REQUEST RECEBIDA
     # ═══════════════════════════════════════════════════════════════
     has_financial = request.financial_context is not None
-    call_phase = "2nd_call" if has_financial else "1st_call"
 
     logger.info(
         "📥 [1/6] REQUEST_RECEIVED — Nova requisição recebida",
         customer_id=request.customer_id,
-        call_phase=call_phase,
         has_financial_context=has_financial,
         company_name=request.profile.company_name if request.profile else "N/A",
         query=request.query[:100] + ("..." if len(request.query) > 100 else ""),
@@ -208,7 +206,7 @@ async def chat(request: AgentRequest) -> AgentResponse:
                 "📤 [6/6] REQUEST_COMPLETED — Resposta enviada com sucesso",
                 customer_id=request.customer_id,
                 status="success",
-                call_phase=call_phase,
+                has_financial_context=has_financial,
                 is_context_request=is_context_request,
                 required_contexts=response.required_contexts if is_context_request else None,
                 total_duration_s=round(duration, 3),

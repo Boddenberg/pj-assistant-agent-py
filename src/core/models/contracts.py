@@ -7,18 +7,13 @@ Isso garante:
   - Serialização/deserialização JSON consistente
   - Documentação via OpenAPI (FastAPI gera docs automaticamente)
 
-Fluxo de duas chamadas (queries financeiras):
-  1ª) BFA → AgentRequest (sem financial_context)
-      [Agente identifica intenção]
-      → AgentResponse com required_contexts=["account","pix",...]
+Fluxo de chamada única (1-call flow):
+  BFA → AgentRequest (com financial_context preenchido pelo BFA)
+  [Agente processa com dados reais]
+  → AgentResponse com answer
 
-  2ª) BFA busca no Supabase só os contextos pedidos
-      BFA → AgentRequest (com financial_context preenchido)
-      [Agente processa com dados reais]
-      → AgentResponse com answer + required_contexts=[]
-
-Fluxo de chamada única (queries sem dados financeiros):
-  BFA → AgentRequest → [Agente] → AgentResponse (required_contexts=[])
+  O BFA busca todos os dados necessários ANTES de chamar o agente
+  e envia tudo em uma única chamada.
 """
 
 from __future__ import annotations
